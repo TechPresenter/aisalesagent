@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
   Bell,
@@ -54,6 +55,31 @@ type TabName = (typeof TABS)[number]["name"];
 
 type Notice = { tone: "ok" | "bad"; text: string };
 
+/** What the settings page accepts in its query string. */
+export interface SettingsQuery {
+  /** "integrations", "call-settings"… — the tab to open. */
+  tab?: string;
+  /** Set by the OAuth callback: the provider that just connected. */
+  connected?: string;
+  /** Set by the OAuth callback when sign-in did not complete. */
+  integration_error?: string;
+}
+
+/** "call-settings" → "Call Settings". Unknown values open the default tab. */
+function tabFromQuery(value: string | undefined): TabName | undefined {
+  if (!value) return undefined;
+  const wanted = value.toLowerCase().replace(/[-_]/g, " ");
+  return TABS.find((entry) => entry.name.toLowerCase() === wanted)?.name;
+}
+
+/** "google_calendar" → "Google Calendar". */
+function providerName(provider: string): string {
+  return provider
+    .split("_")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 /** "MANAGER" -> "Manager", "ACTIVE" -> "Active". */
 function titleCase(value: string | undefined): string {
   return value ? value.charAt(0) + value.slice(1).toLowerCase() : "—";
@@ -73,8 +99,9 @@ const STATUS_TONE: Record<UserStatus, "green" | "amber" | "gray"> = {
  * access. What the API cannot do yet — change a password, edit workspace details, invite
  * someone, buy credits — is shown as unavailable rather than as a form that would not save.
  */
-export function SettingsView() {
-  const [tab, setTab] = useState<TabName>("Profile");
+export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
+  const router = useRouter();
+  const [tab, setTab] = useState<TabName>(() => tabFromQuery(query.tab) ?? "Profile");
   const { user } = useSessionUser();
   const canManageTeam = usePermission("team.manage") === true;
   const canManageSettings = usePermission("settings.manage") === true;
@@ -99,9 +126,29 @@ export function SettingsView() {
 
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(null), 4000);
+    // Failures stay up longer: they usually carry something to read and act on.
+    const timer = window.setTimeout(() => setNotice(null), notice.tone === "bad" ? 9000 : 4000);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  // Arriving back from an OAuth sign-in: say how it went once, then drop the query so a
+  // refresh does not announce it again.
+  useEffect(() => {
+    if (query.connected) {
+      setNotice({ tone: "ok", text: `${providerName(query.connected)} connected.` });
+    } else if (query.integration_error) {
+      setNotice({ tone: "bad", text: query.integration_error });
+    }
+    if (query.connected || query.integration_error || query.tab) {
+      router.replace("/settings", { scroll: false });
+    }
+    // Once, on arrival — the query is gone after the replace above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Stable, because the integrations panels list them as effect dependencies.
+  const noticeOk = useCallback((text: string) => setNotice({ tone: "ok", text }), []);
+  const noticeBad = useCallback((text: string) => setNotice({ tone: "bad", text }), []);
 
   const done = (text: string) => {
     setNotice({ tone: "ok", text });
@@ -185,7 +232,7 @@ export function SettingsView() {
 
           {tab === "Billing" && <BillingTab wallet={wallet} />}
 
-          {tab === "Integrations" && <IntegrationsTab />}
+          {tab === "Integrations" && <IntegrationsTab onSaved={noticeOk} onError={noticeBad} />}
 
           {tab === "Call Settings" && (
             <CallSettingsTab

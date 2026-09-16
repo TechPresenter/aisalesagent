@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import { Prisma, type Notification, type NotificationType } from "@prisma/client";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
 import { scopedCreate } from "../prisma/tenant-scoped";
+import { NotificationEmailService } from "../integrations/notification-email.service";
 import { NotificationPreferencesService } from "./notification-preferences.service";
 
 /** One notification as the bell renders it. */
@@ -45,6 +46,7 @@ export class NotificationsService {
   constructor(
     private readonly tenantPrisma: TenantPrismaFactory,
     private readonly preferences: NotificationPreferencesService,
+    private readonly email: NotificationEmailService,
   ) {}
 
   private get db() {
@@ -60,10 +62,6 @@ export class NotificationsService {
    */
   async raise(input: RaiseNotification): Promise<void> {
     try {
-      // A person can switch an event off for themselves. A workspace-wide notice — the
-      // wallet running dry — is not something one member gets to silence for everyone.
-      if (input.userId && !(await this.wantsInApp(input.userId, input.type))) return;
-
       if (input.dedupeMinutes && input.resourceId) {
         const since = new Date(Date.now() - input.dedupeMinutes * 60_000);
         const recent = await this.db.notification.findFirst({
@@ -73,16 +71,32 @@ export class NotificationsService {
         if (recent) return;
       }
 
-      await this.db.notification.create({
-        data: scopedCreate<Prisma.NotificationUncheckedCreateInput>({
-          userId: input.userId ?? null,
-          type: input.type,
-          title: input.title,
-          body: input.body,
-          linkPath: input.linkPath ?? null,
-          resourceType: input.resourceType ?? null,
-          resourceId: input.resourceId ?? null,
-        }),
+      // A person can switch an event off for themselves. A workspace-wide notice — the
+      // wallet running dry — is not something one member gets to silence for everyone.
+      const inApp = !input.userId || (await this.wantsInApp(input.userId, input.type));
+      if (inApp) {
+        await this.db.notification.create({
+          data: scopedCreate<Prisma.NotificationUncheckedCreateInput>({
+            userId: input.userId ?? null,
+            type: input.type,
+            title: input.title,
+            body: input.body,
+            linkPath: input.linkPath ?? null,
+            resourceType: input.resourceType ?? null,
+            resourceId: input.resourceId ?? null,
+          }),
+        });
+      }
+
+      // Email is decided per recipient, against their own Email switch, whether or not the
+      // bell shows this notice: wanting an event by email and not in the app is allowed.
+      // It sends only when the workspace has connected an email integration.
+      this.email.deliver(this.tenantPrisma.context.tenantId, {
+        type: input.type,
+        title: input.title,
+        body: input.body,
+        linkPath: input.linkPath ?? null,
+        userId: input.userId ?? null,
       });
     } catch (error) {
       this.logger.warn(

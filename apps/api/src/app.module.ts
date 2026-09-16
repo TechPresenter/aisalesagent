@@ -16,6 +16,8 @@ import { FollowUpsModule } from "./followups/followups.module";
 import { UsersModule } from "./users/users.module";
 import { CalendarModule } from "./calendar/calendar.module";
 import { AgentsModule } from "./agents/agents.module";
+import { ApiKeysModule } from "./api-keys/api-keys.module";
+import { IntegrationsModule } from "./integrations/integrations.module";
 import { LeadsModule } from "./leads/leads.module";
 import { PrismaModule } from "./prisma/prisma.module";
 import { WorkspaceModule } from "./workspace/workspace.module";
@@ -57,6 +59,8 @@ import { validateEnv } from "./config/env.validation";
     UsersModule,
     CalendarModule,
     AgentsModule,
+    IntegrationsModule,
+    ApiKeysModule,
   ],
   controllers: [HealthController],
 })

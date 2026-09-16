@@ -1749,7 +1749,7 @@ export const notificationsApi = {
   },
 };
 
-// ── integrations (read-only: provider health) ───────────────────────────────────────
+// ── integrations: provider health ───────────────────────────────────────────────────
 
 export interface ProviderHealth {
   /** "TELEPHONY", "LLM", "SPEECH_TO_TEXT", "TEXT_TO_SPEECH". */
@@ -1770,5 +1770,254 @@ export const providersApi = {
     return apiFetch<{ encryptionReady: boolean; providers: ProviderHealth[] }>(
       "/providers/health",
     );
+  },
+};
+
+// ── integrations: the catalogue ─────────────────────────────────────────────────────
+
+export type IntegrationCategory =
+  | "CRM"
+  | "COMMUNICATION"
+  | "CALENDAR"
+  | "TELEPHONY"
+  | "AI"
+  | "VOICE"
+  | "STORAGE"
+  | "AUTOMATION"
+  | "ANALYTICS";
+
+export type IntegrationAuth = "api_key" | "oauth" | "webhook_url";
+export type IntegrationFeature = "events" | "lead_sync" | "calendar_sync" | "email";
+export type IntegrationStatus = "NOT_CONNECTED" | "CONNECTED" | "ERROR" | "EXPIRED";
+
+export interface IntegrationField {
+  key: string;
+  label: string;
+  /** Secret values are never sent back; a connected integration shows their last four only. */
+  secret: boolean;
+  placeholder?: string;
+  help?: string;
+  optional?: boolean;
+  options?: { value: string; label: string }[];
+  pattern?: string;
+  patternMessage?: string;
+}
+
+export interface IntegrationConnection {
+  status: IntegrationStatus;
+  account: string | null;
+  /** False when the vendor offers no way to check, and the credentials were only stored. */
+  verified: boolean;
+  connectedAt: string;
+  lastVerifiedAt: string | null;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  events: string[];
+  syncLeads: boolean | null;
+  syncCalendar: boolean | null;
+  preview: Record<string, string>;
+}
+
+export interface IntegrationItem {
+  provider: string;
+  name: string;
+  category: IntegrationCategory;
+  color: string;
+  description: string;
+  auth: IntegrationAuth;
+  fields: IntegrationField[];
+  features: IntegrationFeature[];
+  /** What connecting it does today, as the API states it. */
+  does: string[];
+  notYet?: string;
+  docsUrl: string;
+  oauthEnv: { clientId: string; clientSecret: string } | null;
+  /** OAuth providers only: whether the server has an OAuth app configured. */
+  oauthReady: boolean | null;
+  connection: IntegrationConnection | null;
+}
+
+export interface PlatformEventInfo {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface IntegrationsOverview {
+  encryptionReady: boolean;
+  oauthRedirectUri: string;
+  categories: IntegrationCategory[];
+  events: PlatformEventInfo[];
+  items: IntegrationItem[];
+}
+
+export interface IntegrationSettingsInput {
+  events?: string[];
+  syncLeads?: boolean;
+  syncCalendar?: boolean;
+}
+
+export const integrationsApi = {
+  overview(): Promise<IntegrationsOverview> {
+    return apiFetch<IntegrationsOverview>("/integrations");
+  },
+
+  /** Checks the credentials with the vendor; only credentials that work are stored. */
+  connect(
+    provider: string,
+    input: { credentials: Record<string, string>; settings?: IntegrationSettingsInput },
+  ): Promise<IntegrationItem> {
+    return apiFetch<IntegrationItem>(`/integrations/${encodeURIComponent(provider)}/connect`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  update(provider: string, settings: IntegrationSettingsInput): Promise<IntegrationItem> {
+    return apiFetch<IntegrationItem>(`/integrations/${encodeURIComponent(provider)}`, {
+      method: "PATCH",
+      body: JSON.stringify(settings),
+    });
+  },
+
+  test(provider: string): Promise<IntegrationItem> {
+    return apiFetch<IntegrationItem>(`/integrations/${encodeURIComponent(provider)}/test`, {
+      method: "POST",
+    });
+  },
+
+  async disconnect(provider: string): Promise<void> {
+    await apiFetch<void>(`/integrations/${encodeURIComponent(provider)}`, { method: "DELETE" });
+  },
+
+  /** The vendor's sign-in page to send the browser to. It returns to Settings when done. */
+  startOAuth(provider: string): Promise<{ url: string }> {
+    return apiFetch<{ url: string }>(`/integrations/${encodeURIComponent(provider)}/oauth/start`, {
+      method: "POST",
+    });
+  },
+};
+
+// ── integrations: webhooks ──────────────────────────────────────────────────────────
+
+export interface WebhookEndpoint {
+  id: string;
+  url: string;
+  description: string | null;
+  events: string[];
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** The integration that owns this endpoint (Zapier, Make…), when one does. */
+  managedBy: string | null;
+  lastDelivery: { status: WebhookDeliveryStatus; responseStatus: number | null; createdAt: string } | null;
+  failuresLast24h: number;
+}
+
+export type WebhookDeliveryStatus = "PENDING" | "SUCCEEDED" | "FAILED" | "EXHAUSTED";
+
+export interface WebhookDelivery {
+  id: string;
+  webhookId: string;
+  event: string;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  responseStatus: number | null;
+  responseBody: string | null;
+  error: string | null;
+  nextAttemptAt: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+  payload: unknown;
+}
+
+export const webhooksApi = {
+  list(): Promise<WebhookEndpoint[]> {
+    return apiFetch<WebhookEndpoint[]>("/webhooks");
+  },
+
+  /** The signing secret comes back once, here, and never again. */
+  create(input: {
+    url: string;
+    events: string[];
+    description?: string;
+  }): Promise<{ webhook: WebhookEndpoint; secret: string }> {
+    return apiFetch<{ webhook: WebhookEndpoint; secret: string }>("/webhooks", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  update(
+    id: string,
+    input: { url?: string; events?: string[]; isActive?: boolean; description?: string },
+  ): Promise<WebhookEndpoint> {
+    return apiFetch<WebhookEndpoint>(`/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+  },
+
+  rotateSecret(id: string): Promise<{ secret: string }> {
+    return apiFetch<{ secret: string }>(`/webhooks/${id}/rotate-secret`, { method: "POST" });
+  },
+
+  async remove(id: string): Promise<void> {
+    await apiFetch<void>(`/webhooks/${id}`, { method: "DELETE" });
+  },
+
+  test(id: string): Promise<WebhookDelivery> {
+    return apiFetch<WebhookDelivery>(`/webhooks/${id}/test`, { method: "POST" });
+  },
+
+  deliveries(id: string, limit = 25): Promise<WebhookDelivery[]> {
+    return apiFetch<WebhookDelivery[]>(`/webhooks/${id}/deliveries?limit=${limit}`);
+  },
+
+  redeliver(deliveryId: string): Promise<WebhookDelivery> {
+    return apiFetch<WebhookDelivery>(`/webhooks/deliveries/${deliveryId}/redeliver`, {
+      method: "POST",
+    });
+  },
+};
+
+// ── integrations: API keys ──────────────────────────────────────────────────────────
+
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  status: "ACTIVE" | "EXPIRED" | "REVOKED";
+  createdAt: string;
+  createdBy: { id: string; name: string } | null;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface ApiKeyScopeInfo {
+  key: string;
+  label: string;
+  /** False when your own role lacks it, so it cannot be given to a key. */
+  grantable: boolean;
+}
+
+export const apiKeysApi = {
+  list(): Promise<{ keys: ApiKeyInfo[]; scopes: ApiKeyScopeInfo[] }> {
+    return apiFetch<{ keys: ApiKeyInfo[]; scopes: ApiKeyScopeInfo[] }>("/api-keys");
+  },
+
+  /** The key itself comes back once, here: only its hash is stored. */
+  create(input: {
+    name: string;
+    scopes: string[];
+    expiresInDays?: number;
+  }): Promise<{ key: ApiKeyInfo; secret: string }> {
+    return apiFetch<{ key: ApiKeyInfo; secret: string }>("/api-keys", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  async revoke(id: string): Promise<void> {
+    await apiFetch<void>(`/api-keys/${id}`, { method: "DELETE" });
   },
 };

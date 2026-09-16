@@ -36,7 +36,7 @@ export const OFFERED_TYPES: NotificationType[] = [
 ];
 
 /** What a user gets before they have chosen anything: the ones worth interrupting for. */
-const DEFAULT_CHANNELS: Partial<Record<NotificationType, NotificationChannel[]>> = {
+export const DEFAULT_CHANNELS: Partial<Record<NotificationType, NotificationChannel[]>> = {
   INTERESTED_LEAD: ["IN_APP", "EMAIL"],
   DEMO_BOOKED: ["IN_APP", "EMAIL"],
   FOLLOWUP_DUE: ["IN_APP"],

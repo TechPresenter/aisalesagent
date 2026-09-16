@@ -3,6 +3,8 @@ import { Prisma, type Call, type CallOutcome, type CreditTransaction } from "@pr
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
 import { scopedCreate } from "../prisma/tenant-scoped";
 import { CreditsService, InsufficientCreditsError } from "../credits/credits.service";
+import { IntegrationEventsService } from "../integrations/integration-events.service";
+import { callData, leadData } from "../integrations/events/payloads";
 import { NotificationsService } from "../notifications/notifications.service";
 import { ProvidersService } from "../providers/providers.service";
 import { isSandboxProvider } from "../providers/sandbox/sandbox.adapters";
@@ -52,6 +54,7 @@ export class CallsService {
     private readonly credits: CreditsService,
     private readonly providers: ProvidersService,
     private readonly notifications: NotificationsService,
+    private readonly integrationEvents: IntegrationEventsService,
   ) {}
 
   private get db() {
@@ -228,7 +231,21 @@ export class CallsService {
 
     await this.settleLead(updated);
     await this.notifyCallSettled(updated);
-    return this.db.call.findUniqueOrThrow({ where: { id: callId } });
+
+    // Re-read, so the event carries the outcome the post-call pipeline has just recorded.
+    const settled = await this.db.call.findUniqueOrThrow({ where: { id: callId } });
+    await this.emitCallCompleted(settled);
+    return settled;
+  }
+
+  /** Tells integrations a call ended. The lead is included so a chat message can name them. */
+  private async emitCallCompleted(call: Call): Promise<void> {
+    const lead = await this.db.lead.findUnique({ where: { id: call.leadId } });
+    if (!lead) return;
+    this.integrationEvents.emit(this.tenantPrisma.context.tenantId, "call.completed", {
+      call: callData(call),
+      lead: leadData(lead),
+    });
   }
 
   /**
@@ -390,13 +407,24 @@ export class CallsService {
     };
 
     const status = nextStatus[call.status];
-    await this.db.lead.update({
+    const before = status
+      ? await this.db.lead.findUnique({ where: { id: call.leadId }, select: { status: true } })
+      : null;
+    const lead = await this.db.lead.update({
       where: { id: call.leadId },
       data: {
         lastContactedAt: call.endedAt ?? new Date(),
         ...(status ? { status: status as never } : {}),
       },
     });
+
+    if (before && before.status !== lead.status) {
+      this.integrationEvents.emit(this.tenantPrisma.context.tenantId, "lead.status_changed", {
+        lead: leadData(lead),
+        previousStatus: before.status,
+        status: lead.status,
+      });
+    }
 
     if (!call.campaignId) return;
 
@@ -846,7 +874,20 @@ export class CallsService {
     if (!["COMPLETED", "VOICEMAIL"].includes(call.status)) {
       throw new BadRequestException("Only a connected call can be given an outcome.");
     }
-    return this.db.call.update({ where: { id }, data: { outcome } });
+    const updated = await this.db.call.update({ where: { id }, data: { outcome } });
+
+    if (call.outcome !== outcome) {
+      const lead = await this.db.lead.findUnique({ where: { id: updated.leadId } });
+      if (lead) {
+        this.integrationEvents.emit(this.tenantPrisma.context.tenantId, "call.outcome_changed", {
+          call: callData(updated),
+          lead: leadData(lead),
+          previousOutcome: call.outcome,
+          outcome,
+        });
+      }
+    }
+    return updated;
   }
 }
 

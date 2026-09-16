@@ -32,6 +32,12 @@ export interface JwtAccessPayload {
    * because both are checked against the database.
    */
   perms?: string[];
+  /**
+   * Present when the request authenticated with an API key instead of a session. The
+   * principal acts as the key's creator, with `perms` set to the key's scopes, and may only
+   * call routes that declare a permission (see PermissionGuard).
+   */
+  apiKeyId?: string;
   /** Issued-at and expiry, seconds since epoch; added by the signer. */
   iat?: number;
   exp?: number;

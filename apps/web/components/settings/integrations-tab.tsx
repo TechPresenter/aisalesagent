@@ -1,127 +1,123 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Card, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { providersApi, type ProviderHealth } from "@/lib/api-client";
-import { cn, formatDateTime } from "@/lib/utils";
+import { useCallback, useEffect, useState } from "react";
+import { KeyRound, LayoutGrid, Webhook } from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { AppsPanel } from "@/components/settings/integrations/apps-panel";
+import { ApiKeysPanel } from "@/components/settings/integrations/api-keys-panel";
+import { WebhooksPanel } from "@/components/settings/integrations/webhooks-panel";
+import {
+  integrationsApi,
+  type IntegrationItem,
+  type IntegrationsOverview,
+} from "@/lib/api-client";
+import { usePermission } from "@/lib/use-session";
+import { cn } from "@/lib/utils";
 
-const KIND_LABEL: Record<string, { title: string; blurb: string }> = {
-  TELEPHONY: {
-    title: "Telephony",
-    blurb: "Places the calls and streams the audio.",
-  },
-  SPEECH_TO_TEXT: {
-    title: "Speech to text",
-    blurb: "Turns call audio into the transcripts behind every summary.",
-  },
-  TEXT_TO_SPEECH: {
-    title: "Text to speech",
-    blurb: "Gives each AI agent its voice.",
-  },
-  LLM: {
-    title: "Language model",
-    blurb: "Runs the conversation, the qualification and the call summary.",
-  },
-};
+type Section = "apps" | "webhooks" | "keys";
+
+const SECTIONS: { value: Section; label: string; icon: typeof Webhook }[] = [
+  { value: "apps", label: "Apps", icon: LayoutGrid },
+  { value: "webhooks", label: "Webhooks", icon: Webhook },
+  { value: "keys", label: "API keys", icon: KeyRound },
+];
 
 /**
- * Feature List §14 — Settings → Integrations.
+ * Feature List §14 — Settings → Integrations: the app catalogue, outbound webhooks, and
+ * API keys for the REST API.
  *
- * Read-only, and deliberately so: `GET /providers/health` reports what each provider is
- * and whether it answers, but there is no endpoint that stores credentials yet. A form
- * that accepted an API key and dropped it would be worse than a page that says where the
- * keys go today.
+ * Each section is gated by its own permission, as the API gates it: seeing the catalogue
+ * is `integrations.view`, changing it `integrations.manage`, and webhooks and API keys
+ * each have theirs — both start at Admin, because each decides where workspace data goes.
  */
-export function IntegrationsTab() {
-  const [state, setState] = useState<{
-    encryptionReady: boolean;
-    providers: ProviderHealth[];
-  } | null>(null);
+export function IntegrationsTab({
+  onSaved,
+  onError,
+}: {
+  onSaved: (message: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [section, setSection] = useState<Section>("apps");
+  const [overview, setOverview] = useState<IntegrationsOverview | null>(null);
   const [failed, setFailed] = useState(false);
 
+  const canView = usePermission("integrations.view");
+  const canManage = usePermission("integrations.manage") === true;
+  const canWebhooks = usePermission("webhooks.manage") === true;
+  const canKeys = usePermission("apikeys.manage") === true;
+
   useEffect(() => {
-    providersApi.health().then(setState, () => setFailed(true));
+    if (canView !== true) return;
+    integrationsApi.overview().then(setOverview, () => setFailed(true));
+  }, [canView]);
+
+  const replaceItem = useCallback((item: IntegrationItem) => {
+    setOverview((current) =>
+      current
+        ? {
+            ...current,
+            items: current.items.map((entry) => (entry.provider === item.provider ? item : entry)),
+          }
+        : current,
+    );
   }, []);
+
+  if (canView === false) {
+    return (
+      <Card className="p-5">
+        <p className="text-[13px] text-slate-500">Your role does not include access to integrations.</p>
+      </Card>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      <Card className="p-5">
-        <CardHeader className="p-0">
-          <CardTitle>AI &amp; telephony providers</CardTitle>
-          {state && (
-            <Badge tone={state.encryptionReady ? "green" : "amber"}>
-              {state.encryptionReady ? "Credential storage ready" : "Encryption key missing"}
-            </Badge>
-          )}
-        </CardHeader>
+      <div
+        role="tablist"
+        aria-label="Integration sections"
+        className="inline-flex rounded-btn border border-slate-200 bg-surface p-1 shadow-card"
+      >
+        {SECTIONS.map(({ value, label, icon: Icon }) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={section === value}
+            onClick={() => setSection(value)}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-[8px] px-3.5 py-2 text-[13px] font-semibold transition-colors",
+              section === value ? "bg-brand-navy text-white" : "text-slate-500 hover:text-brand-navy",
+            )}
+          >
+            <Icon className="h-4 w-4" strokeWidth={2} />
+            {label}
+          </button>
+        ))}
+      </div>
 
-        {failed ? (
-          <p className="mt-4 text-[13px] text-slate-500">
-            Could not read provider status. Your role may not include integrations access.
-          </p>
-        ) : !state ? (
-          <p className="mt-4 text-[13px] text-slate-400">Loading…</p>
+      {section === "apps" &&
+        (failed ? (
+          <Card className="p-5">
+            <p className="text-[13px] text-slate-500">Could not load the integrations.</p>
+          </Card>
+        ) : !overview ? (
+          <Card className="p-5">
+            <p className="text-[13px] text-slate-400">Loading integrations…</p>
+          </Card>
         ) : (
-          <ul className="mt-4 divide-y divide-slate-100">
-            {state.providers.map((provider) => {
-              const meta = KIND_LABEL[provider.kind] ?? { title: provider.kind, blurb: "" };
-              return (
-                <li key={provider.kind} className="flex flex-wrap items-start gap-3 py-3.5">
-                  <span
-                    aria-hidden
-                    className={cn(
-                      "mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full",
-                      provider.reachable ? "bg-brand-green" : "bg-alert-red",
-                    )}
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[13.5px] font-semibold text-brand-navy">{meta.title}</p>
-                    <p className="text-[12.5px] text-slate-500">{meta.blurb}</p>
-                    {provider.detail && (
-                      <p className="mt-1 text-[12px] text-[#C93B3B]">{provider.detail}</p>
-                    )}
-                    <p className="tabular mt-1 text-[11.5px] text-slate-400">
-                      {provider.provider} · checked {formatDateTime(provider.checkedAt)}
-                    </p>
-                  </div>
-                  <Badge tone={provider.usingSandbox ? "amber" : provider.configured ? "green" : "gray"}>
-                    {provider.usingSandbox
-                      ? "Sandbox"
-                      : provider.configured
-                        ? (provider.configuredProvider ?? "Connected")
-                        : "Not configured"}
-                  </Badge>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </Card>
+          <AppsPanel overview={overview} canManage={canManage} onItemChanged={replaceItem} onNotice={onSaved} />
+        ))}
 
-      <Card className="p-5">
-        <CardTitle>Connecting a real provider</CardTitle>
-        <div className="mt-2 space-y-2 text-[12.5px] leading-relaxed text-slate-600">
-          <p>
-            Sandbox means nothing leaves this machine: calls are simulated, and no audio or
-            transcript is produced. Until a provider is connected, the AI Calling console says
-            so on every call it shows.
-          </p>
-          <p>
-            Credentials are stored encrypted against{" "}
-            <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[11.5px]">
-              CREDENTIALS_ENCRYPTION_KEY
-            </code>
-            , which is why the badge above reports whether that key is present. The screen for
-            entering them is not built yet — the provider records are created through the API.
-          </p>
-          <p>
-            CRM, calendar and WhatsApp Business integrations are in the data model but have no
-            endpoints yet, so they are not listed here rather than shown as switches that would
-            not connect anything.
-          </p>
-        </div>
-      </Card>
+      {section === "webhooks" && (
+        <WebhooksPanel
+          events={overview?.events ?? []}
+          canManage={canWebhooks}
+          onNotice={onSaved}
+          onError={onError}
+        />
+      )}
+
+      {section === "keys" && <ApiKeysPanel canManage={canKeys} onNotice={onSaved} onError={onError} />}
     </div>
   );
 }

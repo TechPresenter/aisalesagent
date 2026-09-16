@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { CreditOperation, Prisma, type CreditTransaction } from "@prisma/client";
+import { IntegrationEventsService } from "../integrations/integration-events.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
@@ -72,6 +73,7 @@ export class CreditsService {
     private readonly prisma: PrismaService,
     private readonly tenantPrisma: TenantPrismaFactory,
     private readonly notifications: NotificationsService,
+    private readonly integrationEvents: IntegrationEventsService,
   ) {}
 
   private get db() {
@@ -178,6 +180,9 @@ export class CreditsService {
     const wallet = await this.db.creditWallet.findFirst();
     const resource = { resourceType: "wallet", resourceId: wallet?.id ?? "wallet", dedupeMinutes: 720 };
 
+    const threshold = wallet?.lowBalanceThreshold ?? null;
+    const { tenantId } = this.tenantPrisma.context;
+
     if (charge.balanceAfter <= 0) {
       await this.notifications.raise({
         ...resource,
@@ -186,10 +191,18 @@ export class CreditsService {
         body: "Calls will be refused until the wallet is topped up.",
         linkPath: "/settings",
       });
+      // Integrations hear about the crossing, not every charge after it: the notice above
+      // is de-duplicated by time, and a Slack channel deserves the same courtesy.
+      if (charge.balanceBefore > 0) {
+        this.integrationEvents.emit(tenantId, "credits.low_balance", {
+          balance: charge.balanceAfter,
+          threshold,
+          exhausted: true,
+        });
+      }
       return;
     }
 
-    const threshold = wallet?.lowBalanceThreshold ?? null;
     if (threshold !== null && charge.balanceAfter <= threshold) {
       await this.notifications.raise({
         ...resource,
@@ -198,6 +211,13 @@ export class CreditsService {
         body: `${charge.balanceAfter} credits left, below the ${threshold} warning level.`,
         linkPath: "/settings",
       });
+      if (charge.balanceBefore > threshold) {
+        this.integrationEvents.emit(tenantId, "credits.low_balance", {
+          balance: charge.balanceAfter,
+          threshold,
+          exhausted: false,
+        });
+      }
     }
   }
 

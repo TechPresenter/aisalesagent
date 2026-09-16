@@ -137,7 +137,7 @@ docker-compose.yml   Postgres (dev + test) and Redis
 | `/follow-ups` | Follow-up queue — schedule, notes, previous call, next actions |
 | `/analytics` | Calls trend, agent performance, funnel, leads by city, insights |
 | `/plans` | Plan chooser — four tiers, monthly/yearly toggle, comparison grid |
-| `/settings` | Profile, company, plan and usage, team, danger zone |
+| `/settings` | Profile, team, billing, integrations, call settings, notifications, security, workspace |
 | `/style-guide` | Design-system QA — every `components/ui` component |
 
 Every screen renders from `apps/web/lib/mock-*.ts`. Those shapes already match the
@@ -145,6 +145,36 @@ responses the corresponding endpoints are specified to return (TRD §8), so wiri
 one up is swapping an import rather than rewriting a component. `lib/leads-repository.ts`
 already prefers the live API when it is reachable and falls back to the seed set
 otherwise — it says which it used, in the console and on screen.
+
+## Integrations
+
+Settings → Integrations has three sections, each backed by the API:
+
+- **Apps** — 37 providers across CRM, communication, calendar, telephony, AI, voice,
+  storage, automation and analytics (`GET /api/integrations`). Pasted credentials are
+  checked with the vendor before they are stored, encrypted with
+  `CREDENTIALS_ENCRYPTION_KEY`. Each card states what connecting it does today: HubSpot,
+  Salesforce, Zoho, Pipedrive and Freshsales receive new leads; Slack, Teams and Google Chat
+  post the events you pick; GA4, Mixpanel and PostHog receive events without names or phone
+  numbers; SendGrid and Resend send notification email; Google Calendar and Outlook mirror
+  calendar events; Zapier, Make, n8n and Pabbly are triggered through signed webhooks.
+  Telephony, AI, voice and storage accounts are verified and stored, but calls still run on
+  the sandbox until live adapters exist — the Calling pipeline card says so.
+- **Webhooks** — `CRUD /api/webhooks`. Every delivery is signed
+  (`X-Appsgain-Signature: sha256=HMAC(secret, "<timestamp>.<body>")`), logged, and retried
+  after 1 min, 5 min, 30 min, 2 h and 8 h. Events: `lead.created`, `leads.imported`,
+  `lead.status_changed`, `call.completed`, `call.outcome_changed`, `followup.due`,
+  `credits.low_balance`.
+- **API keys** — `agk_…` keys for the REST API, sent as `X-API-Key`. Scoped to sales
+  data only, never more than their creator currently holds, refused on account and settings
+  endpoints, and dead on their next request once revoked.
+
+Google Calendar, Outlook and Salesforce connect with OAuth and need an app registered by
+whoever runs the server: set the `*_OAUTH_CLIENT_ID` / `*_OAUTH_CLIENT_SECRET` pairs plus
+`API_PUBLIC_URL` and `WEB_APP_URL` (see `.env.example`), and register
+`<API_PUBLIC_URL>/api/integrations/oauth/callback` as the redirect URI with each vendor.
+Retries and `followup.due` run on an in-process 30-second worker
+([integrations.worker.ts](apps/api/src/integrations/integrations.worker.ts)).
 
 ## Four conventions worth keeping
 

@@ -34,14 +34,23 @@ export class PermissionGuard implements CanActivate {
       context.getClass(),
     ]);
 
+    const request = context.switchToHttp().getRequest<RequestWithTenant>();
+    const user = (request as unknown as { user?: JwtAccessPayload }).user;
+
     // A route with no @RequirePermissions is governed by TenantGuard alone. That is a
     // deliberate default rather than deny-all: the guard chain is global, and making
     // every route declare a permission would mean health checks and token refresh need
     // one too.
-    if (!required || required.length === 0) return true;
-
-    const request = context.switchToHttp().getRequest<RequestWithTenant>();
-    const user = (request as unknown as { user?: JwtAccessPayload }).user;
+    //
+    // Except for API keys. A key is scoped to named permissions, and a route that names
+    // none — changing a password, listing sessions, reading one person's notifications —
+    // is by definition not something a key was scoped to do.
+    if (!required || required.length === 0) {
+      if (user?.apiKeyId) {
+        throw new ForbiddenException("This endpoint is not available to API keys.");
+      }
+      return true;
+    }
 
     if (!user) {
       throw new ForbiddenException("Not authorised");

@@ -41,10 +41,11 @@ const TYPE_LABEL: Record<string, string> = {
 /**
  * Feature List §14 — Settings → Notifications: which events reach you, and how.
  *
- * The choices are stored per person per event type, as the schema models them, and the
- * in-app channel is honoured: switching one off here stops it appearing under the bell.
- * Email and WhatsApp have no sender behind them, which the note below says outright —
- * a preference screen that implies delivery is a promise the app cannot keep.
+ * The choices are stored per person per event type, as the schema models them. In-app is
+ * honoured — switching one off stops it appearing under the bell — and so is Email, once
+ * the workspace connects SendGrid or Resend. WhatsApp has no sender behind it, and digests
+ * have no scheduler, which the note below says outright: a preference screen that implies
+ * delivery is a promise the app cannot keep.
  */
 export function NotificationsTab({
   onSaved,
@@ -186,9 +187,10 @@ export function NotificationsTab({
           </div>
 
           <p className="mt-4 rounded-lg bg-slate-50 p-3 text-[12.5px] leading-relaxed text-slate-500">
-            In-app notifications are delivered now — they appear under the bell in the header.
-            Email and WhatsApp have no sender configured yet, so those choices are saved for
-            when one is, rather than quietly doing nothing under a switch that looks on.
+            In-app notifications appear under the bell in the header. Email is sent as it
+            happens once an admin connects SendGrid or Resend under Integrations; daily and
+            weekly digests are saved but not sent yet. WhatsApp has no sender connected, so that
+            choice is kept for when one is.
           </p>
 
           <div className="mt-4 flex justify-end">

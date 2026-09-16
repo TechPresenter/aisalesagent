@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { CalendarEventType, Prisma, type CalendarEvent } from "@prisma/client";
+import { IntegrationEventsService } from "../integrations/integration-events.service";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
 import { scopedCreate } from "../prisma/tenant-scoped";
 import { dayBounds, localDate, localMidnightPlusDays } from "../followups/followup-rules";
@@ -29,7 +30,10 @@ const EVENT_INCLUDE = {
  */
 @Injectable()
 export class CalendarService {
-  constructor(private readonly tenantPrisma: TenantPrismaFactory) {}
+  constructor(
+    private readonly tenantPrisma: TenantPrismaFactory,
+    private readonly integrationEvents: IntegrationEventsService,
+  ) {}
 
   private get db() {
     return this.tenantPrisma.client;
@@ -126,7 +130,7 @@ export class CalendarService {
     leadId?: string;
     campaignId?: string;
   }): Promise<CalendarEvent> {
-    const { userId } = this.tenantPrisma.context;
+    const { tenantId, userId } = this.tenantPrisma.context;
     const { startAt, endAt } = this.window(input.startAt, input.endAt);
 
     if (input.leadId) {
@@ -134,7 +138,7 @@ export class CalendarService {
       if (!lead) throw new NotFoundException("That lead does not exist in this workspace.");
     }
 
-    return this.db.calendarEvent.create({
+    const event = await this.db.calendarEvent.create({
       data: scopedCreate<Prisma.CalendarEventUncheckedCreateInput>({
         title: input.title.trim(),
         description: input.description,
@@ -148,6 +152,10 @@ export class CalendarService {
         campaignId: input.campaignId,
       }),
     });
+
+    // Copied onto a connected Google or Outlook calendar after the response, when one is.
+    this.integrationEvents.syncCalendarEvent(tenantId, "upsert", event);
+    return event;
   }
 
   /**
@@ -204,6 +212,7 @@ export class CalendarService {
       });
     }
 
+    this.integrationEvents.syncCalendarEvent(this.tenantPrisma.context.tenantId, "upsert", updated);
     return updated;
   }
 
@@ -213,6 +222,7 @@ export class CalendarService {
     // The follow-up outlives its calendar entry deliberately: deleting the appointment is
     // not the same as deciding the lead never needs calling back.
     await this.db.calendarEvent.delete({ where: { id } });
+    this.integrationEvents.syncCalendarEvent(this.tenantPrisma.context.tenantId, "delete", existing);
   }
 
   private window(start: string, end: string): { startAt: Date; endAt: Date } {

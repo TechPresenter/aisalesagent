@@ -4,11 +4,13 @@ import { assertTenantScopeCoverage, tenantScoped, type TenantScopedClient } from
 
 /**
  * The unscoped client. Injecting this gives a caller access to every tenant's rows, so
- * it is reserved for the three places that legitimately need it:
+ * it is reserved for the four places that legitimately need it:
  *
- *   1. Authentication — resolving a login before a tenant is known.
+ *   1. Authentication — resolving a login or an API key before a tenant is known.
  *   2. `POST /workspace` — creating the tenant that scope would be relative to.
  *   3. Test setup and teardown.
+ *   4. The integrations worker's sweep for due webhook retries and follow-ups across all
+ *      workspaces, which hands each row to a tenant-scoped client before acting on it.
  *
  * Everything else asks for `forTenant(tenantId)` and gets a client that cannot see out
  * of its own workspace. Feature code should reach for TenantPrisma (see

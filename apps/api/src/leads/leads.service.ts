@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { ActivityType, Prisma, type Lead, type LeadActivity } from "@prisma/client";
 import { parse } from "csv-parse/sync";
+import { IntegrationEventsService } from "../integrations/integration-events.service";
+import { leadData } from "../integrations/events/payloads";
 import { NotificationsService } from "../notifications/notifications.service";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
 import { scopedCreate } from "../prisma/tenant-scoped";
@@ -63,6 +65,7 @@ export class LeadsService {
   constructor(
     private readonly tenantPrisma: TenantPrismaFactory,
     private readonly notifications: NotificationsService,
+    private readonly integrationEvents: IntegrationEventsService,
   ) {}
 
   private get db() {
@@ -234,6 +237,10 @@ export class LeadsService {
         resourceId: lead.id,
       });
 
+      this.integrationEvents.emit(this.tenantPrisma.context.tenantId, "lead.created", {
+        lead: leadData(lead),
+      });
+
       return lead;
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
@@ -281,6 +288,14 @@ export class LeadsService {
 
     for (const entry of diffLead(before, after)) {
       await this.record(id, entry.type, entry.summary, entry.metadata);
+    }
+
+    if (before.status !== after.status) {
+      this.integrationEvents.emit(this.tenantPrisma.context.tenantId, "lead.status_changed", {
+        lead: leadData(after),
+        previousStatus: before.status,
+        status: after.status,
+      });
     }
 
     return after;
@@ -427,6 +442,17 @@ export class LeadsService {
         `${result.duplicatesInDatabase.length} existing, ` +
         `${result.rejected.length} rejected`,
     );
+
+    // One event for the whole file rather than one per row: a thousand-lead import is one
+    // thing that happened, and a Slack channel should hear about it once.
+    if (result.toInsert.length > 0) {
+      this.integrationEvents.emit(this.tenantPrisma.context.tenantId, "leads.imported", {
+        imported: result.toInsert.length,
+        duplicates: result.duplicatesInFile.length + result.duplicatesInDatabase.length,
+        rejected: result.rejected.length,
+        source: dto.source ?? "UPLOAD",
+      });
+    }
 
     return { ...toSummary(result, result.toInsert.length), dryRun: false };
   }
