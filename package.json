@@ -1,0 +1,38 @@
+{
+  "name": "appsgain-ai-sales-agent",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run build:shared && concurrently -n web,api -c cyan,magenta \"npm:dev:web\" \"npm:dev:api\"",
+    "dev:web": "npm run dev --workspace=@appsgain/web",
+    "dev:api": "npm run start:dev --workspace=@appsgain/api",
+    "dev:ai": "python -m uvicorn app.main:app --reload --port 8000 --app-dir apps/ai-service",
+    "build": "npm run build:shared && npm run build --workspace=@appsgain/web && npm run build --workspace=@appsgain/api",
+    "build:shared": "npm run build --workspace=@appsgain/shared",
+    "lint": "npm run lint --workspace=@appsgain/web && npm run lint --workspace=@appsgain/api",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "npm run build:shared && npm run typecheck --workspace=@appsgain/web && npm run typecheck --workspace=@appsgain/api",
+    "test": "npm run test --workspace=@appsgain/api",
+    "test:e2e": "npm run test:e2e --workspace=@appsgain/api",
+    "db:generate": "npm run prisma:generate --workspace=@appsgain/api",
+    "db:migrate": "npm run prisma:migrate --workspace=@appsgain/api",
+    "db:studio": "npm run prisma:studio --workspace=@appsgain/api",
+    "db:dev": "npm run db:dev --workspace=@appsgain/api",
+    "db:seed": "npm run db:seed --workspace=@appsgain/api"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "concurrently": "^9.1.0",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.6.3"
+  }
+}

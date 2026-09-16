@@ -1,0 +1,1832 @@
+// TRD §7 — Data Model.
+//
+// THE TENANT CONVENTION, which every future table must follow:
+//
+//   1. Every tenant-scoped model carries `tenantId String @map("tenant_id")` and a
+//      relation to Tenant with `onDelete: Cascade`.
+//   2. Every tenant-scoped model declares `@@index([tenantId])`. Every query the API
+//      issues is filtered by tenant, so this is the leading column of nearly every
+//      access path; without it each one degrades to a sequential scan as tenants grow.
+//   3. Any uniqueness that is unique *per workspace* — an email, a subdomain-local
+//      slug, a phone number — is declared as a compound `@@unique([tenantId, x])`,
+//      never a bare `@unique`. A bare unique would leak one tenant's data into
+//      another's constraint space: tenant B could discover that tenant A has a lead
+//      with a given phone number simply by failing to insert it.
+//   4. The model name must be added to TENANT_SCOPED_MODELS in
+//      src/prisma/tenant-scoped.ts. That set is what makes the row filter automatic;
+//      a model missing from it is a model any tenant can read. `assertTenantScopeCoverage()`
+//      refuses to boot the API until every model is classified.
+//
+// Tenant itself is the one exception to (1) — it is the root of the tree. Plan and
+// Permission are catalogues shared by every workspace and are classified as roots too.
+//
+// NAMING: the product calls a workspace an "organization"; this schema has always
+// called it a Tenant, and the isolation machinery (TenantGuard, tenantScoped,
+// TENANT_SCOPED_MODELS, the e2e isolation suite) is named to match. They are the same
+// thing. Renaming would churn every one of those call sites to buy nothing.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Identity and access
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/// TRD §4 — User Roles & Personas. Mirrors ROLES in @appsgain/shared; src/auth/role-sync.ts
+/// fails to compile if the two ever drift apart.
+///
+/// These five are the *system* roles, baked in because guards reason about their rank.
+/// Workspace-defined roles live in CustomRole and carry an explicit permission set.
+enum Role {
+  SUPER_ADMIN
+  OWNER
+  ADMIN
+  MANAGER
+  AGENT
+  VIEWER
+}
+
+enum TenantStatus {
+  ACTIVE
+  TRIAL
+  SUSPENDED
+  CANCELLED
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
+
+/// The root of all tenant-scoped data. Never carries a tenantId of its own.
+model Tenant {
+  id               String       @id @default(uuid())
+  name             String
+  /// Becomes `{subdomain}.appsgain.app`, so it is globally unique by nature.
+  subdomain        String       @unique
+  industryVertical String?      @map("industry_vertical")
+  /// TRD §12 — the white-label payload the web app renders itself from.
+  brandingConfig   Json?        @map("branding_config")
+  status           TenantStatus @default(TRIAL)
+  timezone         String       @default("Asia/Kolkata")
+  currency         String       @default("INR")
+  /// Set once onboarding completes, so the shell knows whether to resume the wizard.
+  onboardedAt      DateTime?    @map("onboarded_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  users             User[]
+  refreshTokens     RefreshToken[]
+  customRoles       CustomRole[]
+  leads             Lead[]
+  tags              Tag[]
+  leadTags          LeadTag[]
+  leadActivities    LeadActivity[]
+  campaigns         Campaign[]
+  campaignLeads     CampaignLead[]
+  aiAgents          AiAgent[]
+  calls             Call[]
+  callParticipants  CallParticipant[]
+  recordings        Recording[]
+  transcripts       Transcript[]
+  transcriptSegments TranscriptSegment[]
+  salesNotes        SalesNote[]
+  followUps         FollowUp[]
+  calendarEvents    CalendarEvent[]
+  notifications     Notification[]
+  integrations      Integration[]
+  aiProviderConfigs AiProviderConfig[]
+  creditWallet      CreditWallet?
+  creditTransactions CreditTransaction[]
+  subscriptions     Subscription[]
+  invoices          Invoice[]
+  webhooks          Webhook[]
+  webhookDeliveries WebhookDelivery[]
+  auditLogs         AuditLog[]
+  apiKeys           ApiKey[]
+  savedSearches     SavedSearch[]
+  tablePreferences  TablePreference[]
+  exportJobs        ExportJob[]
+  backgroundJobs    BackgroundJob[]
+  settings          TenantSettings?
+  userSettings      UserSettings[]
+  notificationPreferences NotificationPreference[]
+  invitations       Invitation[]
+  paymentMethods    PaymentMethod[]
+  twoFactorAuth     TwoFactorAuth[]
+  backupCodes       BackupCode[]
+  callSettings      CallSettings?
+  aiSettings        AiSettings?
+
+  @@map("tenants")
+}
+
+model User {
+  id           String     @id @default(uuid())
+  tenantId     String     @map("tenant_id")
+  email        String
+  name         String
+  /// Argon2id digest. The plaintext password never leaves AuthService.
+  passwordHash String     @map("password_hash")
+  role         Role       @default(AGENT)
+  /// Set when the workspace has defined its own role; overrides `role` for permission
+  /// checks while `role` still supplies rank for the "at least this role" guards.
+  customRoleId String?    @map("custom_role_id")
+  status       UserStatus @default(ACTIVE)
+  phone        String?
+  avatarUrl    String?    @map("avatar_url")
+  language     String     @default("en")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  /// Consecutive failures since the last success. Reset on login, read by the lockout
+  /// check — stored rather than held in memory so a lockout survives a restart and
+  /// cannot be cleared by cycling API instances.
+  failedLoginCount Int     @default(0) @map("failed_login_count")
+  lockedUntil  DateTime?  @map("locked_until")
+  lastLoginAt  DateTime?  @map("last_login_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customRole CustomRole? @relation(fields: [customRoleId], references: [id], onDelete: SetNull)
+
+  refreshTokens     RefreshToken[]
+  assignedLeads     Lead[]              @relation("LeadOwner")
+  leadActivities    LeadActivity[]
+  callParticipants  CallParticipant[]
+  salesNotes        SalesNote[]
+  followUps         FollowUp[]
+  calendarEvents    CalendarEvent[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  apiKeys           ApiKey[]
+  savedSearches     SavedSearch[]
+  tablePreferences  TablePreference[]
+  exportJobs        ExportJob[]
+  settings          UserSettings?
+  notificationPreferences NotificationPreference[]
+  twoFactor         TwoFactorAuth?
+
+  /// Per-workspace, not global: the same person may hold an account in two workspaces,
+  /// which is why login takes a subdomain alongside the email.
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([tenantId, role])
+  @@map("users")
+}
+
+/// One row per issued refresh token, so logout can revoke a single session rather than
+/// every session the user has. Only the digest is stored — a database read cannot be
+/// replayed as a login.
+model RefreshToken {
+  id        String    @id @default(uuid())
+  tenantId  String    @map("tenant_id")
+  userId    String    @map("user_id")
+  tokenHash String    @map("token_hash")
+  /// Recorded so Settings → Security can list "active sessions" meaningfully.
+  userAgent String?   @map("user_agent")
+  ipAddress String?   @map("ip_address")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+/// The permission catalogue — global, because a permission key means the same thing in
+/// every workspace. Rows are seeded from a constant, never created by tenants.
+model Permission {
+  /// The dotted key used in code: "leads.export", "billing.manage".
+  key         String @id
+  category    String
+  description String
+
+  customRoles CustomRolePermission[]
+
+  @@map("permissions")
+}
+
+/// A workspace-defined role. The five system roles are the `Role` enum; this is how a
+/// tenant builds its own on top of the same permission catalogue.
+model CustomRole {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  name        String
+  description String?
+  /// The system role whose rank this custom role inherits, so ordering comparisons
+  /// ("at least MANAGER") keep working without every guard learning about custom roles.
+  baseRole    Role     @default(AGENT) @map("base_role")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant      Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions CustomRolePermission[]
+  users       User[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("custom_roles")
+}
+
+/// Join between a workspace's custom role and the global permission catalogue.
+model CustomRolePermission {
+  customRoleId  String @map("custom_role_id")
+  permissionKey String @map("permission_key")
+
+  customRole CustomRole @relation(fields: [customRoleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionKey], references: [key], onDelete: Cascade)
+
+  @@id([customRoleId, permissionKey])
+  @@index([customRoleId])
+  @@map("custom_role_permissions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Leads
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/// Feature List §2 — where the lead came from.
+enum LeadSource {
+  UPLOAD
+  AI_FOUND
+  WEBSITE
+  REFERRAL
+  SOCIAL_MEDIA
+  IMPORT
+  API
+  MANUAL
+}
+
+/// Working Flow §Flow 6 — Lead status state machine.
+enum LeadStatus {
+  NEW
+  CONTACTED
+  INTERESTED
+  FOLLOW_UP
+  DEMO_BOOKED
+  NEGOTIATION
+  CONVERTED
+  NOT_INTERESTED
+  NO_ANSWER
+  WRONG_NUMBER
+  INVALID
+  LOST
+  CLOSED
+}
+
+enum LeadTemperature {
+  HOT
+  WARM
+  COLD
+}
+
+model Lead {
+  id            String          @id @default(uuid())
+  tenantId      String          @map("tenant_id")
+  /// The company. `contactPerson` is the human who answers.
+  name          String
+  contactPerson String?         @map("contact_person")
+  jobTitle      String?         @map("job_title")
+  /// Stored normalised to E.164-ish digits (see normalisePhone in leads.dedupe.ts) so
+  /// "+91 98765 43210" and "09876543210" cannot both be imported as separate leads.
+  phone         String
+  email         String?
+  website       String?
+  address       String?
+  city          String?
+  state         String?
+  country       String?         @default("India")
+  industry      String?
+  companySize   String?         @map("company_size")
+  source        LeadSource      @default(UPLOAD)
+  status        LeadStatus      @default(NEW)
+  /// Feature List §2 — AI lead score, 0–100.
+  score         Int             @default(0)
+  /// Why the score is what it is — the factor list the detail page renders. Kept beside
+  /// the score so a number is never shown without its rationale.
+  scoreReasons  Json?           @map("score_reasons")
+  scoredAt      DateTime?       @map("scored_at")
+  temperature   LeadTemperature @default(COLD)
+  ownerId       String?         @map("owner_id")
+  /// TRD §7 — per-Industry-Template custom fields.
+  customFields  Json?           @map("custom_fields")
+  /// Compliance (§13): a lead on the do-not-call list is never dialled, whatever a
+  /// campaign says. Enforced in the calling pipeline, stored here so it survives
+  /// re-import.
+  doNotCall     Boolean         @default(false) @map("do_not_call")
+  lastContactedAt DateTime?     @map("last_contacted_at")
+  convertedAt   DateTime?       @map("converted_at")
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner  User?  @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+
+  tags           LeadTag[]
+  activities     LeadActivity[]
+  campaignLeads  CampaignLead[]
+  calls          Call[]
+  salesNotes     SalesNote[]
+  followUps      FollowUp[]
+  calendarEvents CalendarEvent[]
+
+  /// The de-duplication rule, enforced by the database rather than only in application
+  /// code: one lead per phone number per workspace. Compound with tenantId so two
+  /// workspaces may each hold the same number — they are different businesses calling
+  /// the same company.
+  @@unique([tenantId, phone])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, ownerId])
+  @@index([tenantId, score])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, lastContactedAt])
+  @@map("leads")
+}
+
+model Tag {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  label     String
+  /// A semantic tone from lib/status.ts, so a tag is coloured by meaning not by whim.
+  tone      String   @default("gray")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  leads  LeadTag[]
+
+  @@unique([tenantId, label])
+  @@index([tenantId])
+  @@map("tags")
+}
+
+/// Join table. Carries tenantId of its own so the scoped client can filter it directly
+/// rather than having to reason through two relations.
+model LeadTag {
+  tenantId String @map("tenant_id")
+  leadId   String @map("lead_id")
+  tagId    String @map("tag_id")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([leadId, tagId])
+  @@index([tenantId])
+  @@index([tagId])
+  @@map("lead_tags")
+}
+
+enum ActivityType {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+  SCORE_CHANGED
+  ASSIGNED
+  CALL_PLACED
+  CALL_COMPLETED
+  NOTE_ADDED
+  FOLLOWUP_CREATED
+  FOLLOWUP_COMPLETED
+  EMAIL_SENT
+  WHATSAPP_SENT
+  IMPORTED
+  TAG_ADDED
+  TAG_REMOVED
+}
+
+/// The lead's timeline. Append-only: rows are never updated, so the history of a lead is
+/// a fact rather than a rendering of its current state.
+model LeadActivity {
+  id        String       @id @default(uuid())
+  tenantId  String       @map("tenant_id")
+  leadId    String       @map("lead_id")
+  /// Null when the actor was the system — an AI call outcome, an automation.
+  actorId   String?      @map("actor_id")
+  type      ActivityType
+  summary   String
+  /// Before/after values for the field that changed, when one did.
+  metadata  Json?
+  createdAt DateTime     @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead   Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  actor  User?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([leadId, createdAt])
+  @@map("lead_activities")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Campaigns
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+enum CampaignType {
+  AI_CALLING
+  EMAIL
+  WHATSAPP
+  MANUAL
+  MULTI_CHANNEL
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+model Campaign {
+  id             String         @id @default(uuid())
+  tenantId       String         @map("tenant_id")
+  name           String
+  description    String?
+  type           CampaignType   @default(AI_CALLING)
+  status         CampaignStatus @default(DRAFT)
+  targetAudience String?        @map("target_audience")
+  startDate      DateTime?      @map("start_date")
+  endDate        DateTime?      @map("end_date")
+
+  /// The AI agent that places this campaign's calls. Nullable because a DRAFT campaign
+  /// is allowed to be incomplete; activation validates it.
+  aiAgentId      String?  @map("ai_agent_id")
+  callScript     String?  @map("call_script")
+  aiInstructions String?  @map("ai_instructions")
+
+  /// Calling rules (§13). Hours are minutes-from-midnight in `timezone`, which avoids
+  /// storing a wall-clock time whose meaning changes with the server's locale.
+  dailyCallLimit    Int?     @map("daily_call_limit")
+  callWindowStart   Int?     @map("call_window_start")
+  callWindowEnd     Int?     @map("call_window_end")
+  timezone          String   @default("Asia/Kolkata")
+  language          String   @default("en")
+  maxAttempts       Int      @default(3) @map("max_attempts")
+  retryDelayMinutes Int      @default(240) @map("retry_delay_minutes")
+  /// Days of week the campaign may dial, 0=Sunday. Empty means every day.
+  callDays          Int[]    @default([]) @map("call_days")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  aiAgent AiAgent? @relation(fields: [aiAgentId], references: [id], onDelete: SetNull)
+
+  campaignLeads  CampaignLead[]
+  calls          Call[]
+  salesNotes     SalesNote[]
+  followUps      FollowUp[]
+  calendarEvents CalendarEvent[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@map("campaigns")
+}
+
+enum CampaignLeadState {
+  PENDING
+  QUEUED
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+  SKIPPED
+  EXHAUSTED
+}
+
+/// A lead's membership in a campaign, and its dialling state within it.
+///
+/// `attempts` lives here rather than on Lead because the retry budget is per campaign:
+/// the same lead worked by two campaigns has two independent budgets.
+model CampaignLead {
+  tenantId     String            @map("tenant_id")
+  campaignId   String            @map("campaign_id")
+  leadId       String            @map("lead_id")
+  state        CampaignLeadState @default(PENDING)
+  attempts     Int               @default(0)
+  lastAttemptAt DateTime?        @map("last_attempt_at")
+  nextAttemptAt DateTime?        @map("next_attempt_at")
+  addedAt      DateTime          @default(now()) @map("added_at")
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  lead     Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@id([campaignId, leadId])
+  @@index([tenantId])
+  @@index([leadId])
+  /// The dialer's hot path: "next N leads in this campaign that are due".
+  @@index([campaignId, state, nextAttemptAt])
+  @@map("campaign_leads")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// AI agents and provider configuration
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/// A configured AI voice persona. Human agents are Users with role AGENT — there is no
+/// separate table for them, because a human agent is someone who logs in.
+model AiAgent {
+  id          String  @id @default(uuid())
+  tenantId    String  @map("tenant_id")
+  name        String
+  avatarUrl   String? @map("avatar_url")
+  language    String  @default("hi-IN")
+  accent      String?
+  gender      String?
+  /// The TTS voice id at the configured provider (e.g. an ElevenLabs voice).
+  voiceId     String? @map("voice_id")
+  personality String?
+
+  systemPrompt          String? @map("system_prompt")
+  openingMessage        String? @map("opening_message")
+  qualificationQuestions Json?  @map("qualification_questions")
+  objectionHandling     Json?   @map("objection_handling")
+  closingInstructions   String? @map("closing_instructions")
+  knowledgeBase         String? @map("knowledge_base")
+  /// When to hand off to a human, and to whom.
+  transferRules         Json?   @map("transfer_rules")
+  dispositionRules      Json?   @map("disposition_rules")
+
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaigns Campaign[]
+  calls     Call[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@map("ai_agents")
+}
+
+enum AiProviderKind {
+  LLM
+  SPEECH_TO_TEXT
+  TEXT_TO_SPEECH
+  TELEPHONY
+}
+
+/// Per-workspace provider selection (§15). Credentials are encrypted at rest and never
+/// serialised to the client — the API returns `isConfigured` and never the ciphertext.
+model AiProviderConfig {
+  id        String         @id @default(uuid())
+  tenantId  String         @map("tenant_id")
+  kind      AiProviderKind
+  /// "openai" | "anthropic" | "gemini" | "elevenlabs" | "deepgram" | "twilio" | …
+  provider  String
+  /// Model or voice identifier at that provider.
+  model     String?
+  /// AES-256-GCM ciphertext. Decrypted only inside the provider adapter, server-side.
+  credentialsEncrypted String? @map("credentials_encrypted")
+  /// Which provider to fall back to when this one errors or times out (§15).
+  fallbackProvider String? @map("fallback_provider")
+  isPrimary Boolean        @default(false) @map("is_primary")
+  isActive  Boolean        @default(true) @map("is_active")
+  lastCheckedAt DateTime?  @map("last_checked_at")
+  lastError String?        @map("last_error")
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// One primary per kind is enforced in the service; this stops two rows for the same
+  /// provider+kind existing at all.
+  @@unique([tenantId, kind, provider])
+  @@index([tenantId])
+  @@map("ai_provider_configs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Calls, recordings, transcripts
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+enum CallDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum CallStatus {
+  QUEUED
+  DIALING
+  RINGING
+  CONNECTED
+  ON_HOLD
+  TRANSFERRING
+  COMPLETED
+  FAILED
+  BUSY
+  NO_ANSWER
+  VOICEMAIL
+  CANCELLED
+}
+
+enum CallOutcome {
+  INTERESTED
+  FOLLOW_UP
+  NOT_INTERESTED
+  NO_ANSWER
+  WRONG_NUMBER
+  DEMO_BOOKED
+  CALLBACK_REQUESTED
+  DO_NOT_CALL
+}
+
+enum Sentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+model Call {
+  id         String        @id @default(uuid())
+  tenantId   String        @map("tenant_id")
+  leadId     String        @map("lead_id")
+  campaignId String?       @map("campaign_id")
+  aiAgentId  String?       @map("ai_agent_id")
+  direction  CallDirection @default(OUTBOUND)
+  status     CallStatus    @default(QUEUED)
+  outcome    CallOutcome?
+
+  /// The number actually dialled, snapshotted: a lead's phone may be corrected later,
+  /// and the call log must still say what was rung.
+  phone      String
+  /// Provider's own call id, for reconciling webhooks and pulling media.
+  providerCallId String?  @map("provider_call_id")
+  provider       String?
+  /// Seconds. Null until the call ends; 0 for a call that never connected.
+  durationSeconds Int?    @map("duration_seconds")
+  /// Set when the AI handed off to a human (§14 transfer rules).
+  transferredToId String? @map("transferred_to_id")
+  failureReason   String? @map("failure_reason")
+
+  queuedAt    DateTime  @default(now()) @map("queued_at")
+  startedAt   DateTime? @map("started_at")
+  answeredAt  DateTime? @map("answered_at")
+  endedAt     DateTime? @map("ended_at")
+
+  /// Credits this call consumed, denormalised from the ledger so call history can show
+  /// cost without joining. The ledger remains the source of truth for the balance.
+  creditsUsed Int      @default(0) @map("credits_used")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead     Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  aiAgent  AiAgent?  @relation(fields: [aiAgentId], references: [id], onDelete: SetNull)
+
+  participants CallParticipant[]
+  recording    Recording?
+  transcript   Transcript?
+  salesNotes   SalesNote[]
+  followUps    FollowUp[]
+
+  @@unique([tenantId, providerCallId])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, startedAt])
+  @@index([leadId, startedAt])
+  @@index([campaignId, status])
+  @@map("calls")
+}
+
+enum ParticipantRole {
+  AI_AGENT
+  HUMAN_AGENT
+  LEAD
+  SUPERVISOR
+}
+
+/// Who was on the call. A plain AI-to-lead call has two rows; a transfer or a supervisor
+/// listening in adds more, which is the case a `humanAgentId` column on Call could not
+/// represent.
+model CallParticipant {
+  id       String          @id @default(uuid())
+  tenantId String          @map("tenant_id")
+  callId   String          @map("call_id")
+  role     ParticipantRole
+  /// Set when the participant is a platform user.
+  userId   String?         @map("user_id")
+  label    String
+  joinedAt DateTime        @default(now()) @map("joined_at")
+  leftAt   DateTime?       @map("left_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  call   Call   @relation(fields: [callId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([callId])
+  @@map("call_participants")
+}
+
+/// Recording metadata. The audio itself lives in object storage (§17) — a database is
+/// the wrong place for media, and private recordings are served through signed URLs so
+/// the storage key alone grants nothing.
+model Recording {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  callId      String   @unique @map("call_id")
+  /// Bucket-relative key. Never a public URL: access goes through a signed-URL endpoint
+  /// that re-checks tenancy on every request.
+  storageKey  String   @map("storage_key")
+  storageBucket String @map("storage_bucket")
+  mimeType    String   @default("audio/mpeg") @map("mime_type")
+  sizeBytes   BigInt   @map("size_bytes")
+  durationSeconds Int  @map("duration_seconds")
+  /// Precomputed waveform peaks, so the player does not download the audio to draw it.
+  waveformPeaks Json?  @map("waveform_peaks")
+  /// Retention is a plan entitlement (§32); the sweeper deletes past this date.
+  expiresAt   DateTime? @map("expires_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  call   Call   @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, expiresAt])
+  @@map("recordings")
+}
+
+model Transcript {
+  id        String     @id @default(uuid())
+  tenantId  String     @map("tenant_id")
+  callId    String     @unique @map("call_id")
+  language  String     @default("hi-IN")
+  /// Provider confidence 0–1, so a low-confidence transcript can be flagged rather than
+  /// presented as fact.
+  confidence Float?
+  provider  String?
+
+  /// §19 — the AI analysis pass, all nullable because it runs after the transcript
+  /// lands and may fail independently of it.
+  summary        String?
+  sentiment      Sentiment?
+  intent         String?
+  objections     Json?
+  buyingSignals  Json?      @map("buying_signals")
+  competitorMentions Json?  @map("competitor_mentions")
+  topics         Json?
+  actionItems    Json?      @map("action_items")
+  suggestedOutcome CallOutcome? @map("suggested_outcome")
+  suggestedFollowUpAt DateTime? @map("suggested_follow_up_at")
+  analysedAt     DateTime?  @map("analysed_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  call     Call                @relation(fields: [callId], references: [id], onDelete: Cascade)
+  segments TranscriptSegment[]
+
+  @@index([tenantId])
+  @@map("transcripts")
+}
+
+/// One utterance. Separate rows rather than a JSON blob because §18 requires searching
+/// across transcripts and seeking audio to a segment — both of which want an index.
+model TranscriptSegment {
+  id           String  @id @default(uuid())
+  tenantId     String  @map("tenant_id")
+  transcriptId String  @map("transcript_id")
+  /// Ordinal within the call, so segments sort without relying on float comparison.
+  sequence     Int
+  speaker      ParticipantRole
+  speakerLabel String  @map("speaker_label")
+  text         String
+  /// Offsets into the recording, in milliseconds. Clicking a segment seeks here.
+  startMs      Int     @map("start_ms")
+  endMs        Int     @map("end_ms")
+  confidence   Float?
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  transcript Transcript @relation(fields: [transcriptId], references: [id], onDelete: Cascade)
+
+  @@unique([transcriptId, sequence])
+  @@index([tenantId])
+  @@index([transcriptId, startMs])
+  @@map("transcript_segments")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Notes, follow-ups, calendar
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+enum NoteType {
+  GENERAL
+  FOLLOW_UP
+  PRICING
+  DEMO
+  OBJECTION
+  INQUIRY
+  POSITIVE
+  NEGATIVE
+}
+
+model SalesNote {
+  id         String    @id @default(uuid())
+  tenantId   String    @map("tenant_id")
+  leadId     String    @map("lead_id")
+  callId     String?   @map("call_id")
+  campaignId String?   @map("campaign_id")
+  /// Null when the AI wrote it and nobody has edited it yet.
+  authorId   String?   @map("author_id")
+  title      String?
+  content    String
+  type       NoteType  @default(GENERAL)
+  sentiment  Sentiment?
+  /// True until a human edits it, so the UI can say "AI-generated" honestly.
+  isAiGenerated Boolean @default(false) @map("is_ai_generated")
+  editedAt   DateTime? @map("edited_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead     Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  call     Call?     @relation(fields: [callId], references: [id], onDelete: SetNull)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  author   User?     @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([leadId, createdAt])
+  @@index([tenantId, type])
+  @@map("sales_notes")
+}
+
+/// §21 lists PENDING / TODAY / OVERDUE / COMPLETED / CANCELLED.
+///
+/// Only three of those are stored. "Today" and "Overdue" are functions of `dueAt` and
+/// the current clock, not states anything writes: a PENDING row would have to be
+/// rewritten at midnight, every night, in every timezone, to stay accurate — and any
+/// row the job missed would lie. They are derived on read instead.
+enum FollowUpStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+enum FollowUpChannel {
+  CALL
+  WHATSAPP
+  EMAIL
+  MEETING
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model FollowUp {
+  id         String          @id @default(uuid())
+  tenantId   String          @map("tenant_id")
+  leadId     String          @map("lead_id")
+  campaignId String?         @map("campaign_id")
+  /// The call that produced this follow-up, when one did.
+  callId     String?         @map("call_id")
+  assigneeId String?         @map("assignee_id")
+  dueAt      DateTime        @map("due_at")
+  channel    FollowUpChannel @default(CALL)
+  priority   Priority        @default(MEDIUM)
+  status     FollowUpStatus  @default(PENDING)
+  notes      String?
+  /// When to fire the reminder notification. Null means no reminder.
+  remindAt   DateTime?       @map("remind_at")
+  reminderSentAt DateTime?   @map("reminder_sent_at")
+  completedAt DateTime?      @map("completed_at")
+  isAiGenerated Boolean      @default(false) @map("is_ai_generated")
+  createdAt  DateTime        @default(now()) @map("created_at")
+  updatedAt  DateTime        @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead     Lead      @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  call     Call?     @relation(fields: [callId], references: [id], onDelete: SetNull)
+  assignee User?     @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  calendarEvent CalendarEvent?
+
+  @@index([tenantId])
+  /// The queue view: open follow-ups by due date.
+  @@index([tenantId, status, dueAt])
+  @@index([leadId])
+  @@index([assigneeId, dueAt])
+  /// The reminder sweeper: unsent reminders that are now due.
+  @@index([remindAt, reminderSentAt])
+  @@map("follow_ups")
+}
+
+enum CalendarEventType {
+  FOLLOW_UP
+  DEMO
+  MEETING
+  CALL
+  REMINDER
+}
+
+model CalendarEvent {
+  id          String            @id @default(uuid())
+  tenantId    String            @map("tenant_id")
+  title       String
+  description String?
+  type        CalendarEventType @default(MEETING)
+  startAt     DateTime          @map("start_at")
+  endAt       DateTime          @map("end_at")
+  allDay      Boolean           @default(false) @map("all_day")
+  location    String?
+  ownerId     String?           @map("owner_id")
+  leadId      String?           @map("lead_id")
+  campaignId  String?           @map("campaign_id")
+  /// One calendar event per follow-up, so rescheduling either side stays in step.
+  followUpId  String?           @unique @map("follow_up_id")
+
+  /// External calendar sync (§22). `externalId` is the event id at the provider;
+  /// `externalProvider` is "google" | "outlook".
+  externalProvider String?      @map("external_provider")
+  externalId       String?      @map("external_id")
+  lastSyncedAt     DateTime?    @map("last_synced_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner    User?     @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  lead     Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  campaign Campaign? @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  followUp FollowUp? @relation(fields: [followUpId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  /// The calendar's only real query: everything overlapping a visible window.
+  @@index([tenantId, startAt, endAt])
+  @@index([ownerId, startAt])
+  @@map("calendar_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Notifications
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+enum NotificationType {
+  NEW_LEAD
+  INTERESTED_LEAD
+  FOLLOWUP_DUE
+  FOLLOWUP_OVERDUE
+  DEMO_BOOKED
+  CALL_COMPLETED
+  CALL_FAILED
+  CREDITS_LOW
+  CREDITS_EXHAUSTED
+  SUBSCRIPTION_EXPIRING
+  PAYMENT_FAILED
+  INTEGRATION_ERROR
+  EXPORT_READY
+  SYSTEM_ALERT
+}
+
+model Notification {
+  id       String           @id @default(uuid())
+  tenantId String           @map("tenant_id")
+  /// Null for workspace-wide notices every member should see.
+  userId   String?          @map("user_id")
+  type     NotificationType
+  title    String
+  body     String
+  /// Where clicking it should go.
+  linkPath String?          @map("link_path")
+  /// The row this is about, for de-duplicating repeat notices.
+  resourceType String?      @map("resource_type")
+  resourceId   String?      @map("resource_id")
+  readAt   DateTime?        @map("read_at")
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  /// The bell's unread count, which runs on every page load.
+  @@index([userId, readAt])
+  @@index([tenantId, createdAt])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Integrations and webhooks
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+enum IntegrationCategory {
+  CRM
+  COMMUNICATION
+  CALENDAR
+  TELEPHONY
+  AI
+  VOICE
+  STORAGE
+  AUTOMATION
+  ANALYTICS
+}
+
+enum IntegrationStatus {
+  NOT_CONNECTED
+  CONNECTED
+  ERROR
+  EXPIRED
+}
+
+/// One row per connected third-party service. Credentials are a separate encrypted
+/// column rather than loose fields so that "never serialise this" is a property of one
+/// named thing a reviewer can grep for.
+model Integration {
+  id       String              @id @default(uuid())
+  tenantId String              @map("tenant_id")
+  category IntegrationCategory
+  /// "hubspot" | "twilio" | "google_calendar" | …
+  provider String
+  status   IntegrationStatus   @default(NOT_CONNECTED)
+  /// AES-256-GCM ciphertext of tokens/keys. Never leaves the server.
+  credentialsEncrypted String? @map("credentials_encrypted")
+  /// Non-secret settings — selected calendar id, default pipeline, etc.
+  settings Json?
+  /// OAuth expiry, so a refresh can be scheduled before the token dies.
+  tokenExpiresAt DateTime?     @map("token_expires_at")
+  lastSyncAt     DateTime?     @map("last_sync_at")
+  lastError      String?       @map("last_error")
+  connectedById  String?       @map("connected_by_id")
+  createdAt DateTime           @default(now()) @map("created_at")
+  updatedAt DateTime           @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, provider])
+  @@index([tenantId])
+  @@map("integrations")
+}
+
+model Webhook {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  url       String
+  /// HMAC signing secret. Encrypted; the plaintext is shown once at creation.
+  secretEncrypted String @map("secret_encrypted")
+  /// Event keys from §27 — "lead.created", "call.completed", …
+  events    String[]
+  isActive  Boolean  @default(true) @map("is_active")
+  description String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant     Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([tenantId])
+  @@map("webhooks")
+}
+
+enum DeliveryStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  EXHAUSTED
+}
+
+model WebhookDelivery {
+  id         String         @id @default(uuid())
+  tenantId   String         @map("tenant_id")
+  webhookId  String         @map("webhook_id")
+  event      String
+  payload    Json
+  status     DeliveryStatus @default(PENDING)
+  attempts   Int            @default(0)
+  responseStatus Int?       @map("response_status")
+  responseBody   String?    @map("response_body")
+  error      String?
+  nextAttemptAt DateTime?   @map("next_attempt_at")
+  deliveredAt DateTime?     @map("delivered_at")
+  createdAt  DateTime       @default(now()) @map("created_at")
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([webhookId, createdAt])
+  /// The retry sweeper.
+  @@index([status, nextAttemptAt])
+  @@map("webhook_deliveries")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Credits and billing
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/// Metered operations (§31). Every one of these debits the wallet through the ledger.
+enum CreditOperation {
+  AI_LEAD_SEARCH
+  AI_CALL
+  TRANSCRIPTION
+  AI_ANALYSIS
+  AI_ENRICHMENT
+  WHATSAPP_MESSAGE
+  EMAIL_SEND
+  PURCHASE
+  PLAN_GRANT
+  MANUAL_ADJUSTMENT
+  REFUND
+  EXPIRY
+}
+
+enum CreditEntryType {
+  DEBIT
+  CREDIT
+}
+
+/// The wallet holds the running balance; CreditTransaction is the ledger that explains
+/// it. The balance is a materialised sum, not the truth — the truth is the ledger, and
+/// a reconciliation job can rebuild `balance` from it.
+///
+/// Every mutation must take a row lock on this wallet (`SELECT … FOR UPDATE`) inside the
+/// same transaction that writes the ledger row. Two concurrent calls that both read a
+/// balance of 1 and both decide they can afford a call would otherwise both proceed.
+model CreditWallet {
+  id        String   @id @default(uuid())
+  tenantId  String   @unique @map("tenant_id")
+  balance   Int      @default(0)
+  /// Warn the workspace below this. Null uses the platform default.
+  lowBalanceThreshold Int? @map("low_balance_threshold")
+  lowBalanceNotifiedAt DateTime? @map("low_balance_notified_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("credit_wallets")
+}
+
+/// Append-only. Rows are never updated or deleted — a correction is another row.
+model CreditTransaction {
+  id            String          @id @default(uuid())
+  tenantId      String          @map("tenant_id")
+  type          CreditEntryType
+  operation     CreditOperation
+  /// Always positive; `type` carries the direction. Storing a signed amount invites a
+  /// debit that accidentally credits.
+  amount        Int
+  balanceBefore Int             @map("balance_before")
+  balanceAfter  Int             @map("balance_after")
+  /// The call, search or invoice this entry pays for.
+  referenceType String?         @map("reference_type")
+  referenceId   String?         @map("reference_id")
+  /// Set for MANUAL_ADJUSTMENT so an admin's correction is attributable.
+  actorId       String?         @map("actor_id")
+  note          String?
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@index([referenceType, referenceId])
+  @@map("credit_transactions")
+}
+
+/// The plan catalogue — global, like Permission. A tenant subscribes to one of these.
+model Plan {
+  id           String  @id @default(uuid())
+  /// Stable key used in code and entitlement checks: "starter", "professional", …
+  key          String  @unique
+  name         String
+  tagline      String?
+  /// Paise/cents, not rupees — integer money, never a float.
+  monthlyPrice Int     @map("monthly_price")
+  yearlyPrice  Int     @map("yearly_price")
+  currency     String  @default("INR")
+  isPublic     Boolean @default(true) @map("is_public")
+  sortOrder    Int     @default(0) @map("sort_order")
+
+  /// Entitlements (§70). Held as columns rather than JSON because the entitlement
+  /// service checks them on every metered action and they should be queryable.
+  monthlyCallLimit    Int?  @map("monthly_call_limit")
+  leadLimit           Int?  @map("lead_limit")
+  teamMemberLimit     Int?  @map("team_member_limit")
+  storageGb           Int?  @map("storage_gb")
+  recordingRetentionDays Int? @map("recording_retention_days")
+  includedCredits     Int   @default(0) @map("included_credits")
+  /// Feature flag keys this plan unlocks (§69).
+  features            String[] @default([])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum BillingPeriod {
+  MONTHLY
+  YEARLY
+}
+
+model Subscription {
+  id       String             @id @default(uuid())
+  tenantId String             @map("tenant_id")
+  planId   String             @map("plan_id")
+  status   SubscriptionStatus @default(TRIALING)
+  period   BillingPeriod      @default(MONTHLY)
+
+  currentPeriodStart DateTime  @map("current_period_start")
+  currentPeriodEnd   DateTime  @map("current_period_end")
+  trialEndsAt        DateTime? @map("trial_ends_at")
+  cancelAtPeriodEnd  Boolean   @default(false) @map("cancel_at_period_end")
+  cancelledAt        DateTime? @map("cancelled_at")
+
+  /// Gateway identifiers. Status is only ever changed from a verified gateway webhook —
+  /// never from the client, which cannot be trusted to report its own payment.
+  gateway              String?  @map("gateway")
+  gatewaySubscriptionId String? @map("gateway_subscription_id")
+  gatewayCustomerId    String?  @map("gateway_customer_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan     Plan      @relation(fields: [planId], references: [id])
+  invoices Invoice[]
+
+  @@unique([tenantId, gatewaySubscriptionId])
+  @@index([tenantId])
+  @@index([status, currentPeriodEnd])
+  @@map("subscriptions")
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  tenantId       String        @map("tenant_id")
+  subscriptionId String?       @map("subscription_id")
+  number         String
+  status         InvoiceStatus @default(DRAFT)
+  /// Paise/cents.
+  subtotal       Int
+  tax            Int           @default(0)
+  total          Int
+  currency       String        @default("INR")
+  periodStart    DateTime?     @map("period_start")
+  periodEnd      DateTime?     @map("period_end")
+  dueAt          DateTime?     @map("due_at")
+  paidAt         DateTime?     @map("paid_at")
+  gatewayInvoiceId String?     @map("gateway_invoice_id")
+  hostedUrl      String?       @map("hosted_url")
+  lineItems      Json?         @map("line_items")
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, number])
+  @@index([tenantId, createdAt])
+  @@map("invoices")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Platform: audit, keys, saved views, jobs
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+/// §45. Append-only, and deliberately not cascade-deleted with the user: an audit trail
+/// that disappears when you delete the account that made it is not an audit trail.
+model AuditLog {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  actorId      String?  @map("actor_id")
+  /// Denormalised so the entry still names someone after the user row is gone.
+  actorEmail   String?  @map("actor_email")
+  action       String
+  resourceType String   @map("resource_type")
+  resourceId   String?  @map("resource_id")
+  metadata     Json?
+  ipAddress    String?  @map("ip_address")
+  userAgent    String?  @map("user_agent")
+  /// True when a SUPER_ADMIN performed this while impersonating (§71).
+  viaImpersonation Boolean @default(false) @map("via_impersonation")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actor  User?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@index([resourceType, resourceId])
+  @@map("audit_logs")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid())
+  tenantId   String    @map("tenant_id")
+  name       String
+  /// SHA-256 of the key. The plaintext is shown once, at creation, and never again.
+  keyHash    String    @unique @map("key_hash")
+  /// First 8 chars, so the UI can identify a key without holding it.
+  keyPrefix  String    @map("key_prefix")
+  scopes     String[]  @default([])
+  createdById String?  @map("created_by_id")
+  lastUsedAt DateTime? @map("last_used_at")
+  expiresAt  DateTime? @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@map("api_keys")
+}
+
+/// §10 — a saved AI lead search, so a prompt that worked can be re-run.
+model SavedSearch {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id")
+  name      String
+  /// The natural-language prompt as typed.
+  prompt    String
+  /// The structured criteria the AI derived from it.
+  criteria  Json
+  isFavorite Boolean @default(false) @map("is_favorite")
+  lastRunAt DateTime? @map("last_run_at")
+  resultCount Int?   @map("result_count")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([userId])
+  @@map("saved_searches")
+}
+
+/// §68 — remembered table state, per user per table. One row per (user, table) rather
+/// than a blob on User, so adding a table does not rewrite everyone's preferences.
+model TablePreference {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  userId   String @map("user_id")
+  /// "leads" | "calls" | "follow-ups" — the table this applies to.
+  tableKey String @map("table_key")
+  filters  Json?
+  sort     Json?
+  /// Column keys in display order; absent keys are hidden.
+  columns  String[] @default([])
+  pageSize Int      @default(10) @map("page_size")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tableKey])
+  @@index([tenantId])
+  @@map("table_preferences")
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum ExportFormat {
+  CSV
+  XLSX
+  PDF
+}
+
+/// §29 — a large export runs in the background and produces a downloadable file.
+model ExportJob {
+  id        String       @id @default(uuid())
+  tenantId  String       @map("tenant_id")
+  userId    String       @map("user_id")
+  /// "leads" | "calls" | "transcripts" | …
+  resource  String
+  format    ExportFormat
+  /// The filters in force when the export was requested, so the file matches what the
+  /// user was looking at rather than the whole table.
+  filters   Json?
+  status    JobStatus    @default(QUEUED)
+  rowCount  Int?         @map("row_count")
+  storageKey String?     @map("storage_key")
+  error     String?
+  /// Exports hold a snapshot of tenant data, so they expire rather than living forever.
+  expiresAt DateTime?    @map("expires_at")
+  createdAt DateTime     @default(now()) @map("created_at")
+  completedAt DateTime?  @map("completed_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@map("export_jobs")
+}
+
+/// §49 — the durable record of queued work. The queue runtime (BullMQ/Redis) holds the
+/// live job; this table is what survives a Redis flush and what the admin job monitor
+/// reads.
+model BackgroundJob {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  /// "call.place" | "transcript.analyse" | "lead.enrich" | …
+  kind        String
+  payload     Json
+  status      JobStatus @default(QUEUED)
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(3) @map("max_attempts")
+  /// Set by the queue runtime, for correlating with its own dashboard.
+  queueJobId  String?   @map("queue_job_id")
+  error       String?
+  runAfter    DateTime  @default(now()) @map("run_after")
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([status, runAfter])
+  @@index([kind, status])
+  @@map("background_jobs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────
+// Settings
+//
+// Settings §23: workspace settings belong to a tenant, personal settings belong to a
+// user, and the two are never mixed. That is why these are separate tables rather than
+// one `settings` blob — "my timezone" and "the company's timezone" are different facts
+// that different people may change, and a shared row cannot express that.
+//
+// Grouping: general/regional/privacy/retention share TenantSettings because they are
+// small and always read together. Call and AI settings each get their own table — both
+// are large, both are read on hot paths (the dialer, the analysis worker) that do not
+// want the rest, and both change independently.
+// ─────────────────────────────────────────────────────────────────────────────────────
+
+enum DateFormat {
+  DMY
+  MDY
+  YMD
+}
+
+enum TimeFormat {
+  H12
+  H24
+}
+
+/// One row per workspace. Created with the tenant, never absent.
+model TenantSettings {
+  id       String @id @default(uuid())
+  tenantId String @unique @map("tenant_id")
+
+  // General
+  logoUrl     String? @map("logo_url")
+  website     String?
+  industry    String?
+  companySize String? @map("company_size")
+  addressLine String? @map("address_line")
+  city        String?
+  state       String?
+  country     String? @default("India")
+  postalCode  String? @map("postal_code")
+
+  // Regional
+  timezone   String     @default("Asia/Kolkata")
+  currency   String     @default("INR")
+  language   String     @default("en")
+  dateFormat DateFormat @default(DMY) @map("date_format")
+  timeFormat TimeFormat @default(H12) @map("time_format")
+
+  // Business defaults
+  defaultLeadStatus   LeadStatus @default(NEW) @map("default_lead_status")
+  defaultCampaignId   String?    @map("default_campaign_id")
+  defaultAiAgentId    String?    @map("default_ai_agent_id")
+  defaultOwnerId      String?    @map("default_owner_id")
+  defaultFollowUpDays Int        @default(3) @map("default_follow_up_days")
+
+  // Data and privacy. Retention is also a plan entitlement; the effective value is the
+  // stricter of the two, resolved in the entitlement service rather than here.
+  recordingRetentionDays   Int?    @map("recording_retention_days")
+  transcriptRetentionDays  Int?    @map("transcript_retention_days")
+  analyticsTrackingEnabled Boolean @default(true) @map("analytics_tracking_enabled")
+  aiProcessingEnabled      Boolean @default(true) @map("ai_processing_enabled")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_settings")
+}
+
+/// Personal preferences. One row per user; Appearance lives here because a theme is the
+/// user's choice, not the workspace's.
+model UserSettings {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  userId   String @unique @map("user_id")
+
+  jobTitle   String? @map("job_title")
+  department String?
+
+  // Locale overrides. Null means "inherit the workspace value" — a nullable column
+  // rather than a copy of the tenant default, so changing the workspace default moves
+  // everyone who never expressed a preference.
+  timezone   String?
+  language   String?
+  dateFormat DateFormat? @map("date_format")
+  country    String?
+
+  // Appearance
+  theme             String  @default("system")
+  accentColor       String  @default("blue") @map("accent_color")
+  density           String  @default("comfortable")
+  sidebarCollapsed  Boolean @default(false) @map("sidebar_collapsed")
+  animationsEnabled Boolean @default(true) @map("animations_enabled")
+  reduceMotion      Boolean @default(false) @map("reduce_motion")
+  highContrast      Boolean @default(false) @map("high_contrast")
+  largerText        Boolean @default(false) @map("larger_text")
+
+  // Quiet hours, minutes from midnight in the user's effective timezone.
+  quietHoursEnabled Boolean @default(false) @map("quiet_hours_enabled")
+  quietHoursStart   Int?    @map("quiet_hours_start")
+  quietHoursEnd     Int?    @map("quiet_hours_end")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("user_settings")
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  WHATSAPP
+  PUSH
+}
+
+enum NotificationFrequency {
+  INSTANT
+  DAILY_DIGEST
+  WEEKLY_DIGEST
+}
+
+/// One row per user per notification type. A row-per-type table rather than a JSON blob
+/// because the dispatcher asks "who wants EMAIL for FOLLOWUP_DUE" on every send, and
+/// that is an indexed lookup here and a full scan over blobs otherwise.
+///
+/// Absence means "use the default for this type", so a newly added NotificationType
+/// ships with sensible behaviour instead of silently reaching nobody.
+model NotificationPreference {
+  id        String                @id @default(uuid())
+  tenantId  String                @map("tenant_id")
+  userId    String                @map("user_id")
+  type      NotificationType
+  channels  NotificationChannel[] @default([])
+  frequency NotificationFrequency @default(INSTANT)
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type])
+  @@index([tenantId])
+  @@map("notification_preferences")
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+/// A pending team member. Not a User row with status INVITED, because an invitation may
+/// be revoked or expire without ever becoming a person, and a half-real user row is what
+/// makes seat counts and login lookups subtly wrong.
+model Invitation {
+  id           String           @id @default(uuid())
+  tenantId     String           @map("tenant_id")
+  email        String
+  name         String?
+  role         Role             @default(AGENT)
+  customRoleId String?          @map("custom_role_id")
+  /// SHA-256 of the invite token. The plaintext goes in the email and is never stored,
+  /// so a database read cannot be turned into an accepted invitation.
+  tokenHash    String           @unique @map("token_hash")
+  status       InvitationStatus @default(PENDING)
+  invitedById  String?          @map("invited_by_id")
+  expiresAt    DateTime         @map("expires_at")
+  acceptedAt   DateTime?        @map("accepted_at")
+  revokedAt    DateTime?        @map("revoked_at")
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// One live invitation per address per workspace. Re-inviting replaces rather than
+  /// stacking, which is what stops three emails from three impatient clicks.
+  @@unique([tenantId, email])
+  @@index([tenantId])
+  @@index([status, expiresAt])
+  @@map("invitations")
+}
+
+/// A saved payment instrument. Only the gateway's token and the display fragments are
+/// held; a card number never touches this database, which is what keeps the app out of
+/// PCI scope.
+model PaymentMethod {
+  id                     String   @id @default(uuid())
+  tenantId               String   @map("tenant_id")
+  gateway                String
+  gatewayPaymentMethodId String   @map("gateway_payment_method_id")
+  brand                  String?
+  last4                  String?
+  expiryMonth            Int?     @map("expiry_month")
+  expiryYear             Int?     @map("expiry_year")
+  isDefault              Boolean  @default(false) @map("is_default")
+  createdAt              DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, gatewayPaymentMethodId])
+  @@index([tenantId])
+  @@map("payment_methods")
+}
+
+/// TOTP enrolment. Separate from User so the secret has its own lifecycle and is not
+/// read by every query that loads a user.
+model TwoFactorAuth {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+  userId   String @unique @map("user_id")
+  /// AES-256-GCM ciphertext of the TOTP secret.
+  secretEncrypted String @map("secret_encrypted")
+  /// Enrolment is two-step: the secret is created when the QR is shown and only becomes
+  /// active once a code is verified. An unconfirmed row must not lock anyone out.
+  confirmedAt DateTime? @map("confirmed_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backupCodes BackupCode[]
+
+  @@index([tenantId])
+  @@map("two_factor_auth")
+}
+
+/// Single-use recovery codes. Hashed like passwords, and marked used rather than deleted
+/// so "you have 3 of 10 codes left" stays answerable.
+model BackupCode {
+  id          String    @id @default(uuid())
+  tenantId    String    @map("tenant_id")
+  twoFactorId String    @map("two_factor_id")
+  codeHash    String    @map("code_hash")
+  usedAt      DateTime? @map("used_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  twoFactor TwoFactorAuth @relation(fields: [twoFactorId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([twoFactorId])
+  @@map("backup_codes")
+}
+
+enum VoicemailBehavior {
+  HANG_UP
+  LEAVE_MESSAGE
+  RETRY_LATER
+}
+
+/// Workspace-wide calling defaults. A campaign may override most of these; the
+/// compliance fields it may not, which is the reason they live at workspace level.
+model CallSettings {
+  id       String @id @default(uuid())
+  tenantId String @unique @map("tenant_id")
+
+  callingEnabled   Boolean @default(false) @map("calling_enabled")
+  defaultAiAgentId String? @map("default_ai_agent_id")
+  defaultLanguage  String  @default("hi-IN") @map("default_language")
+  defaultVoiceId   String? @map("default_voice_id")
+  timezone         String  @default("Asia/Kolkata")
+  callerId         String? @map("caller_id")
+
+  recordingEnabled     Boolean @default(true) @map("recording_enabled")
+  transcriptionEnabled Boolean @default(true) @map("transcription_enabled")
+  aiAnalysisEnabled    Boolean @default(true) @map("ai_analysis_enabled")
+
+  // Rules. Windows are minutes from midnight in `timezone`.
+  callWindowStart       Int               @default(600) @map("call_window_start")
+  callWindowEnd         Int               @default(1140) @map("call_window_end")
+  callDays              Int[]             @default([1, 2, 3, 4, 5]) @map("call_days")
+  maxCallsPerDay        Int?              @map("max_calls_per_day")
+  maxAttemptsPerLead    Int               @default(3) @map("max_attempts_per_lead")
+  retryDelayMinutes     Int               @default(240) @map("retry_delay_minutes")
+  ringTimeoutSeconds    Int               @default(30) @map("ring_timeout_seconds")
+  maxCallSeconds        Int               @default(600) @map("max_call_seconds")
+  silenceTimeoutSeconds Int               @default(8) @map("silence_timeout_seconds")
+  voicemailBehavior     VoicemailBehavior @default(HANG_UP) @map("voicemail_behavior")
+
+  // Compliance. The defaults are the conservative choice on purpose: a workspace has to
+  // opt *out* of announcing that a call is recorded, not remember to opt in.
+  dncEnabled            Boolean  @default(true) @map("dnc_enabled")
+  blockedNumbers        String[] @default([]) @map("blocked_numbers")
+  allowedCountries      String[] @default([]) @map("allowed_countries")
+  recordingAnnouncement Boolean  @default(true) @map("recording_announcement")
+  consentRequired       Boolean  @default(true) @map("consent_required")
+
+  // Credit controls
+  minimumBalanceRequired Int     @default(10) @map("minimum_balance_required")
+  stopWhenCreditsLow     Boolean @default(true) @map("stop_when_credits_low")
+  lowCreditThreshold     Int     @default(50) @map("low_credit_threshold")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("call_settings")
+}
+
+/// Which AI features are on and how they behave. Provider credentials are not here; they
+/// live in AiProviderConfig, encrypted, because a settings row gets read and serialised
+/// far more often than a secret should be.
+model AiSettings {
+  id       String @id @default(uuid())
+  tenantId String @unique @map("tenant_id")
+
+  temperature     Float @default(0.7)
+  maxOutputTokens Int   @default(1024) @map("max_output_tokens")
+  timeoutSeconds  Int   @default(30) @map("timeout_seconds")
+  maxRetries      Int   @default(2) @map("max_retries")
+
+  // Feature switches
+  leadScoringEnabled        Boolean @default(true) @map("lead_scoring_enabled")
+  leadEnrichmentEnabled     Boolean @default(true) @map("lead_enrichment_enabled")
+  callSummaryEnabled        Boolean @default(true) @map("call_summary_enabled")
+  transcriptAnalysisEnabled Boolean @default(true) @map("transcript_analysis_enabled")
+  noteGenerationEnabled     Boolean @default(true) @map("note_generation_enabled")
+  followUpGenerationEnabled Boolean @default(true) @map("follow_up_generation_enabled")
+  campaignGenerationEnabled Boolean @default(true) @map("campaign_generation_enabled")
+  emailGenerationEnabled    Boolean @default(false) @map("email_generation_enabled")
+  assistantEnabled          Boolean @default(true) @map("assistant_enabled")
+
+  /// Workspace-level system prompt, prepended to every AI call.
+  customInstructions String? @map("custom_instructions")
+
+  // Safety. A spend ceiling enforced server-side is the difference between a runaway
+  // prompt loop costing a few rupees and costing a month's revenue.
+  maxDailyCredits      Int?     @map("max_daily_credits")
+  maxDailyRequests     Int?     @map("max_daily_requests")
+  restrictedTopics     String[] @default([]) @map("restricted_topics")
+  requireHumanApproval Boolean  @default(false) @map("require_human_approval")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("ai_settings")
+}

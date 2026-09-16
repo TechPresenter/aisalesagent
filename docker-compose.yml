@@ -1,0 +1,61 @@
+# Local development dependencies only — the apps themselves run on the host via
+# `npm run dev`, so a code change does not need a container rebuild.
+#
+# TRD §6: PostgreSQL is the primary database; Redis is the cache, dialer job queue and
+# the pub/sub channel behind the live-call WebSocket stream.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: appsgain-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: appsgain
+      POSTGRES_PASSWORD: appsgain
+      POSTGRES_DB: appsgain
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appsgain -d appsgain"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # A second database on the same server, used only by the API integration tests so a
+  # test run can truncate every table without touching development data.
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: appsgain-postgres-test
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: appsgain
+      POSTGRES_PASSWORD: appsgain
+      POSTGRES_DB: appsgain_test
+    ports:
+      - "5433:5432"
+    # Test data is disposable, so it lives in the container layer and is gone on `down`.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appsgain -d appsgain_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: appsgain-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
+  redis-data:

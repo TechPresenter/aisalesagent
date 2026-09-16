@@ -1,0 +1,30 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+.env
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+
+# Local PGlite dev database (seeded rows, password hashes; ~60 MB)
+.pglite/
+
+# Python (apps/ai-service)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs and test output
+*.log
+coverage/
+
+# Claude Code: personal settings and locally installed skills (third-party tooling)
+.claude/settings.local.json
+.claude/skills/
+
+# Source Word documents; the specifications live in docs/ as markdown
+*.docx

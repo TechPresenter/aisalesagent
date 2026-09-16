@@ -1,0 +1,11 @@
+{
+  "root": true,
+  "extends": ["../../.eslintrc.base.json"],
+  "env": { "node": true, "jest": true },
+  "ignorePatterns": ["dist", "node_modules", ".eslintrc.json"],
+  "rules": {
+    // Nest's DI is decorator-driven; empty constructors with parameter properties and
+    // interface-shaped DTO classes are idiomatic here, not smells.
+    "@typescript-eslint/no-empty-function": ["error", { "allow": ["constructors"] }]
+  }
+}

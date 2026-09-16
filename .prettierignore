@@ -1,0 +1,10 @@
+node_modules
+.next
+dist
+build
+coverage
+package-lock.json
+apps/api/prisma/migrations
+apps/ai-service/.venv
+apps/ai-service/**/__pycache__
+*.docx
