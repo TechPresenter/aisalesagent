@@ -28,8 +28,8 @@ function toSubdomain(company: string): string {
  * request; the form then signs the owner in with the same credentials.
  *
  * This used to be a plain `<form action="/verify-email">` — a GET that created nothing
- * and put the typed password in the address bar. There is no email-verification endpoint
- * yet, so the flow skips the code screen and continues into the business step, which
+ * and put the typed password in the address bar. Now the owner is signed in first, then
+ * sent to the verification code screen, which continues into the business step that
  * edits the workspace this request just created.
  */
 export function SignUpForm() {
@@ -98,7 +98,7 @@ export function SignUpForm() {
       await usersApi.update(ownerId, { phone: phone.trim() }).catch(() => undefined);
     }
 
-    router.push("/onboarding/business");
+    router.push("/verify-email?next=/onboarding/business");
     router.refresh();
   }
 

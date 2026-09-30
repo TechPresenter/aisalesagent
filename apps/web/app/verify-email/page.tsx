@@ -1,76 +1,19 @@
-"use client";
+import type { Metadata } from "next";
+import { VerifyEmailScreen } from "@/components/auth/recovery-forms";
 
-import { useEffect, useState } from "react";
-import { AuthCard, GradientButton, OtpInput } from "@/components/auth/auth-ui";
-
-const CODE_LENGTH = 6;
-const RESEND_SECONDS = 25;
+export const metadata: Metadata = { title: "Verify Email · Appsgain" };
 
 /**
- * Feature List §1 — Authentication. Email verification.
- *
- * The address is hard-coded here because there is no session to read it from yet; once
- * `POST /auth/register` returns, it comes back with the pending registration.
+ * Feature List §1 — Authentication. Email verification for the signed-in account.
+ * `?next=` is where to go afterwards: onboarding after sign-up, Settings after a reminder.
  */
-const PENDING_EMAIL = "you@yourcompany.com";
-
-export default function VerifyEmailPage() {
-  const [code, setCode] = useState<string[]>(Array(CODE_LENGTH).fill(""));
-  const [secondsLeft, setSecondsLeft] = useState(RESEND_SECONDS);
-
-  // One interval for the whole countdown, cleared on unmount — a per-second timeout
-  // chain would keep firing if the user leaves mid-count.
-  useEffect(() => {
-    if (secondsLeft === 0) return;
-    const timer = window.setInterval(() => setSecondsLeft((s) => Math.max(0, s - 1)), 1000);
-    return () => window.clearInterval(timer);
-  }, [secondsLeft]);
-
-  const complete = code.every((digit) => digit !== "");
-
-  return (
-    <AuthCard
-      title="Verify Your Email"
-      subtitle={`We have sent a ${CODE_LENGTH}-digit code to ${PENDING_EMAIL}`}
-      backHref="/sign-up"
-    >
-      <OtpInput length={CODE_LENGTH} value={code} onChange={setCode} />
-
-      <p className="mt-4 text-center text-[13px] text-slate-500">
-        Didn&apos;t receive the code?{" "}
-        {secondsLeft > 0 ? (
-          <span className="tabular font-semibold text-brand-navy">
-            Resend in 00:{String(secondsLeft).padStart(2, "0")}
-          </span>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setSecondsLeft(RESEND_SECONDS);
-              setCode(Array(CODE_LENGTH).fill(""));
-            }}
-            className="font-semibold text-brand-magenta hover:underline"
-          >
-            Resend code
-          </button>
-        )}
-      </p>
-
-      <div className="mt-5">
-        {/* Disabled until all six boxes are filled: the button is the only feedback the
-            screen gives, so it should not offer to submit an incomplete code. */}
-        <GradientButton href="/onboarding/role" disabled={!complete}>
-          Verify &amp; Continue
-        </GradientButton>
-      </div>
-
-      <div className="mt-6 flex flex-col items-center">
-        <EnvelopeIllustration />
-        <p className="mt-3 text-[14px] font-bold text-brand-navy">Almost there!</p>
-        <p className="text-[13px] text-slate-500">Let&apos;s get you started.</p>
-      </div>
-    </AuthCard>
-  );
+export default function VerifyEmailPage({
+  searchParams,
+}: {
+  searchParams: Record<string, string | string[] | undefined>;
+}) {
+  const next = Array.isArray(searchParams.next) ? searchParams.next[0] : searchParams.next;
+  return <VerifyEmailScreen next={next ?? "/"} illustration={<EnvelopeIllustration />} />;
 }
 
 /** The paper-plane-and-envelope spot illustration under the form. */

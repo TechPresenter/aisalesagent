@@ -9,16 +9,28 @@ import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { randomUUID } from "node:crypto";
 import * as argon2 from "argon2";
+import type { User } from "@prisma/client";
 import type {
   AuthTokens,
   JwtAccessPayload,
   JwtRefreshPayload,
   LoginResponse,
+  LoginResult,
   Role,
   SessionUser,
 } from "@appsgain/shared";
+import { securityNoticeMail } from "../mail/mail-templates";
+import { MailService } from "../mail/mail.service";
 import { PrismaService } from "../prisma/prisma.service";
 import type { LoginDto } from "./dto/auth.dto";
+import { passwordFingerprint, signPurposeToken, verifyPurposeToken } from "./purpose-token";
+import { TwoFactorService } from "./two-factor.service";
+
+/** Consecutive wrong passwords or codes before sign-in pauses for this account. */
+const MAX_FAILED_SIGN_INS = 5;
+const LOCKOUT_MS = 15 * 60_000;
+/** How long a sign-in that passed its password waits for the 2FA code. */
+const TWO_FACTOR_CHALLENGE_MS = 5 * 60_000;
 
 /**
  * Where a session was created. Recorded so Settings → Security can list "this browser,
@@ -50,6 +62,8 @@ export class AuthService {
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly twoFactor: TwoFactorService,
+    private readonly mail: MailService,
   ) {}
 
   static hashPassword(plaintext: string): Promise<string> {
@@ -61,7 +75,7 @@ export class AuthService {
    * Login is one of the few places allowed the unscoped client — there is no tenant to
    * scope to until the workspace has been resolved from the subdomain.
    */
-  async login(dto: LoginDto, context: SessionContext = {}): Promise<LoginResponse> {
+  async login(dto: LoginDto, context: SessionContext = {}): Promise<LoginResult> {
     const tenant = await this.prisma.tenant.findUnique({
       where: { subdomain: dto.subdomain },
       select: { id: true, name: true, status: true },
@@ -83,8 +97,17 @@ export class AuthService {
       throw new UnauthorizedException("Invalid credentials");
     }
 
+    // A paused account answers exactly as a wrong password does, and does not even check
+    // the password: otherwise the pause itself would tell a guesser which addresses have
+    // accounts, and a correct guess during the pause would still be confirmed.
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      await this.burnVerifyTime(dto.password);
+      throw new UnauthorizedException("Invalid credentials");
+    }
+
     const passwordMatches = await argon2.verify(user.passwordHash, dto.password);
     if (!passwordMatches) {
+      await this.recordFailedSignIn(user.id);
       throw new UnauthorizedException("Invalid credentials");
     }
 
@@ -92,9 +115,78 @@ export class AuthService {
       throw new UnauthorizedException("This workspace is no longer active");
     }
 
+    // The password was right, but no session exists until the second factor is too. The
+    // challenge is signed and short-lived, and bound to the current password hash so a
+    // password reset in the meantime voids it.
+    if (await this.twoFactor.isEnabled(user.id)) {
+      return {
+        twoFactorRequired: true,
+        challengeToken: signPurposeToken(
+          this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
+          "login-2fa",
+          { u: user.id, t: user.tenantId, f: passwordFingerprint(user.passwordHash) },
+          TWO_FACTOR_CHALLENGE_MS,
+        ),
+        expiresIn: TWO_FACTOR_CHALLENGE_MS / 1000,
+      };
+    }
+
+    return this.completeSignIn(user, tenant.name, context);
+  }
+
+  /**
+   * Sign-in, step two: the code from an authenticator app, or a backup code.
+   *
+   * Wrong codes count toward the same lockout as wrong passwords. Without that, knowing
+   * the password would buy unlimited guesses at a six-digit number.
+   */
+  async completeTwoFactorSignIn(
+    dto: { challengeToken: string; code: string },
+    context: SessionContext = {},
+  ): Promise<LoginResponse> {
+    const expired = new UnauthorizedException("This sign-in has expired. Enter your password again.");
+    const claims = verifyPurposeToken(
+      this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
+      "login-2fa",
+      dto.challengeToken,
+    );
+    if (!claims) throw expired;
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: claims.u },
+      include: { tenant: { select: { name: true, status: true } } },
+    });
+    if (
+      !user ||
+      user.tenantId !== claims.t ||
+      user.status !== "ACTIVE" ||
+      user.tenant.status === "CANCELLED" ||
+      passwordFingerprint(user.passwordHash) !== claims.f
+    ) {
+      throw expired;
+    }
+
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      throw new UnauthorizedException("Too many attempts. Wait 15 minutes, then sign in again.");
+    }
+
+    if (!(await this.twoFactor.verifyLoginCode(user.id, user.tenantId, dto.code))) {
+      await this.recordFailedSignIn(user.id);
+      throw new UnauthorizedException("That code is not valid.");
+    }
+
+    return this.completeSignIn(user, user.tenant.name, context);
+  }
+
+  /** Everything a successful sign-in does, whichever route it took to get here. */
+  async completeSignIn(
+    user: Pick<User, "id" | "tenantId" | "role" | "email" | "name">,
+    tenantName: string,
+    context: SessionContext = {},
+  ): Promise<LoginResponse> {
     await this.prisma.user.update({
       where: { id: user.id },
-      data: { lastLoginAt: new Date() },
+      data: { lastLoginAt: new Date(), failedLoginCount: 0, lockedUntil: null },
     });
 
     const tokens = await this.issueTokens({
@@ -111,10 +203,35 @@ export class AuthService {
       name: user.name,
       role: user.role as Role,
       tenantId: user.tenantId,
-      tenantName: tenant.name,
+      tenantName,
     };
 
     return { ...tokens, user: sessionUser };
+  }
+
+  /**
+   * One more consecutive failure; the fifth pauses sign-in for fifteen minutes.
+   *
+   * Stored on the row, not in memory, so the pause survives a restart and holds across API
+   * instances. The count restarts after a pause rather than growing, so the sixth wrong
+   * guess after it does not immediately pause the account again.
+   */
+  private async recordFailedSignIn(userId: string): Promise<void> {
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { failedLoginCount: { increment: 1 } },
+      select: { failedLoginCount: true },
+    });
+
+    if (updated.failedLoginCount >= MAX_FAILED_SIGN_INS) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { failedLoginCount: 0, lockedUntil: new Date(Date.now() + LOCKOUT_MS) },
+      });
+      this.logger.warn(
+        `Sign-in paused for 15 minutes after ${MAX_FAILED_SIGN_INS} consecutive failures: user=${userId}`,
+      );
+    }
   }
 
   /**
@@ -257,6 +374,15 @@ export class AuthService {
 
     await this.revokeAllSessions(user.id);
     this.logger.log(`Password changed for user ${user.id}`);
+
+    void this.mail.send({
+      to: user.email,
+      ...securityNoticeMail({
+        name: user.name,
+        event: "Your password was changed",
+        detail: "The password for your Appsgain account was changed, and every device was signed out.",
+      }),
+    });
   }
 
   private async issueTokens(input: {

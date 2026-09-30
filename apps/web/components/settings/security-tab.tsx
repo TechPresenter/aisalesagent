@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, Monitor } from "lucide-react";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { AccountSecurityCards } from "@/components/settings/two-factor-card";
 import { ApiError, authApi } from "@/lib/api-client";
 import { formatDateTime } from "@/lib/utils";
 
@@ -111,6 +112,8 @@ export function SecurityTab({ onChangePassword }: { onChangePassword: () => void
         </div>
       </Card>
 
+      <AccountSecurityCards />
+
       <Card className="p-5">
         <CardHeader className="p-0">
           <CardTitle>Where you are signed in</CardTitle>
@@ -180,13 +183,6 @@ export function SecurityTab({ onChangePassword }: { onChangePassword: () => void
         </p>
       </Card>
 
-      <Card className="p-5">
-        <CardTitle>Two-factor authentication</CardTitle>
-        <p className="mt-1 text-[13px] leading-relaxed text-slate-500">
-          Not available yet. The data model has a place for it, but there is no endpoint to
-          enrol a device or verify a code, so there is nothing here to switch on.
-        </p>
-      </Card>
     </div>
   );
 }

@@ -52,6 +52,7 @@ export const AUTH_ROUTES = [
   "/verify-email",
   "/forgot-password",
   "/reset-password",
+  "/accept-invite",
   "/onboarding",
   "/terms",
   "/privacy",

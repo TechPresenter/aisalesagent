@@ -88,6 +88,20 @@ export interface LoginResponse extends AuthTokens {
   user: SessionUser;
 }
 
+/**
+ * What `POST /auth/login` returns instead of a session when the password was right but
+ * the account has two-factor authentication on: a short-lived challenge to send back with
+ * the code to `POST /auth/login/2fa`, which is what issues the tokens.
+ */
+export interface TwoFactorChallenge {
+  twoFactorRequired: true;
+  challengeToken: string;
+  /** Seconds the challenge stays valid. */
+  expiresIn: number;
+}
+
+export type LoginResult = LoginResponse | TwoFactorChallenge;
+
 export interface RefreshRequest {
   refreshToken: string;
 }

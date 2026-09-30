@@ -1,4 +1,5 @@
 import type { Call, FollowUp, Lead } from "@prisma/client";
+import { appUrl } from "../../config/app-url";
 
 /**
  * The shapes events carry, built in one place so a lead looks the same whether it
@@ -8,14 +9,7 @@ import type { Call, FollowUp, Lead } from "@prisma/client";
  * message actually wants to do next.
  */
 
-/** An absolute link into the web app: "/leads/abc" → "https://app.example.com/leads/abc". */
-export function appUrl(path: string): string {
-  const base =
-    process.env.WEB_APP_URL?.trim() ||
-    (process.env.API_CORS_ORIGINS ?? "").split(",")[0]?.trim() ||
-    "http://localhost:3000";
-  return `${base.replace(/\/+$/, "")}${path}`;
-}
+export { appUrl };
 
 type LeadFields = Pick<
   Lead,

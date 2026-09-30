@@ -3,9 +3,11 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Building2, Loader2 } from "lucide-react";
-import { Field, GradientButton } from "@/components/auth/auth-ui";
-import { ApiError, authApi } from "@/lib/api-client";
+import { Building2, Loader2, ShieldCheck } from "lucide-react";
+import { Field, GradientButton, OtpInput } from "@/components/auth/auth-ui";
+import { ApiError, authApi, type TwoFactorChallenge } from "@/lib/api-client";
+
+const CODE_LENGTH = 6;
 
 /**
  * The real sign-in form: it posts to `POST /auth/login`, stores the returned tokens and
@@ -17,6 +19,9 @@ import { ApiError, authApi } from "@/lib/api-client";
  * (see `LoginRequest` in @appsgain/shared). A deployed environment reads it from the
  * host; localhost has no subdomain to read, so here it is asked for and defaulted to the
  * seeded workspace.
+ *
+ * An account with two-factor authentication gets a challenge back instead of a session,
+ * and the form becomes step two: a code from the authenticator app, or a backup code.
  */
 export function SignInForm() {
   const router = useRouter();
@@ -25,6 +30,14 @@ export function SignInForm() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [challenge, setChallenge] = useState<TwoFactorChallenge | null>(null);
+
+  function enterApp() {
+    // `refresh()` alongside `push()` because the shell reads the session on render;
+    // without it the dashboard can paint once with the pre-login cache.
+    router.push("/");
+    router.refresh();
+  }
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -32,23 +45,38 @@ export function SignInForm() {
     setSubmitting(true);
 
     try {
-      await authApi.login({ subdomain: subdomain.trim(), email: email.trim(), password });
-      // `refresh()` alongside `push()` because the shell reads the session on render;
-      // without it the dashboard can paint once with the pre-login cache.
-      router.push("/");
-      router.refresh();
+      const result = await authApi.login({ subdomain: subdomain.trim(), email: email.trim(), password });
+      if ("twoFactorRequired" in result) {
+        setChallenge(result);
+        setSubmitting(false);
+        return;
+      }
+      enterApp();
     } catch (cause) {
       // 401 is the expected failure and gets the careful wording — never "no such user",
       // which would let anyone enumerate who holds an account in a workspace.
       setError(
         cause instanceof ApiError && cause.status === 401
-          ? "Those credentials do not match an account in this workspace."
+          ? "Those credentials do not match an account in this workspace. After five failed attempts, sign-in pauses for 15 minutes."
           : cause instanceof ApiError && cause.status === 429
             ? "Too many attempts. Wait a moment and try again."
             : "Could not reach the server. Check that the API is running and try again.",
       );
       setSubmitting(false);
     }
+  }
+
+  if (challenge) {
+    return (
+      <TwoFactorStep
+        challenge={challenge}
+        onSignedIn={enterApp}
+        onStartOver={() => {
+          setChallenge(null);
+          setPassword("");
+        }}
+      />
+    );
   }
 
   return (
@@ -162,6 +190,111 @@ export function SignInForm() {
           </div>
         </div>
       )}
+    </form>
+  );
+}
+
+/**
+ * Sign-in, step two. The six boxes take the authenticator code; a lost phone is what the
+ * backup-code field is for. An expired challenge (five minutes) sends the person back to
+ * the password step rather than leaving them typing codes that can no longer work.
+ */
+function TwoFactorStep({
+  challenge,
+  onSignedIn,
+  onStartOver,
+}: {
+  challenge: TwoFactorChallenge;
+  onSignedIn: () => void;
+  onStartOver: () => void;
+}) {
+  const [digits, setDigits] = useState<string[]>(Array(CODE_LENGTH).fill(""));
+  const [useBackup, setUseBackup] = useState(false);
+  const [backupCode, setBackupCode] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const code = useBackup ? backupCode.trim() : digits.join("");
+  const ready = useBackup ? code.replace(/[^a-z0-9]/gi, "").length === 8 : code.length === CODE_LENGTH;
+
+  async function submit(event?: React.FormEvent) {
+    event?.preventDefault();
+    if (!ready || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await authApi.completeTwoFactor({ challengeToken: challenge.challengeToken, code });
+      onSignedIn();
+    } catch (cause) {
+      const message = cause instanceof ApiError ? cause.message : "Could not reach the server. Try again.";
+      setError(message);
+      setDigits(Array(CODE_LENGTH).fill(""));
+      setSubmitting(false);
+    }
+  }
+
+  const expired = error?.includes("expired");
+
+  return (
+    <form onSubmit={submit} className="space-y-4">
+      <div className="flex flex-col items-center text-center">
+        <span className="flex h-12 w-12 items-center justify-center rounded-full bg-brand-magenta/[0.1]">
+          <ShieldCheck className="h-6 w-6 text-brand-magenta" strokeWidth={2} />
+        </span>
+        <p className="mt-3 text-[16px] font-bold text-brand-navy">Two-step verification</p>
+        <p className="mt-1 max-w-[320px] text-[13px] leading-relaxed text-slate-500">
+          {useBackup
+            ? "Enter one of the backup codes you saved when you turned on two-factor authentication."
+            : "Enter the 6-digit code from your authenticator app."}
+        </p>
+      </div>
+
+      {useBackup ? (
+        <input
+          value={backupCode}
+          onChange={(event) => setBackupCode(event.target.value)}
+          placeholder="xxxx-xxxx"
+          autoComplete="one-time-code"
+          autoFocus
+          aria-label="Backup code"
+          className="h-[52px] w-full rounded-btn border border-slate-200 bg-surface text-center font-mono text-[18px] tracking-[0.2em] text-brand-navy placeholder:text-slate-300 focus:border-brand-magenta focus:outline-none focus:ring-2 focus:ring-brand-magenta/20"
+        />
+      ) : (
+        <OtpInput length={CODE_LENGTH} value={digits} onChange={setDigits} />
+      )}
+
+      {error && (
+        <p role="alert" className="rounded-btn bg-alert-red/[0.08] px-3 py-2 text-[12.5px] font-medium text-[#C93B3B]">
+          {error}
+        </p>
+      )}
+
+      <GradientButton type="submit" disabled={!ready || submitting || expired}>
+        {submitting ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.4} />
+            Verifying&hellip;
+          </>
+        ) : (
+          "Verify & Sign In"
+        )}
+      </GradientButton>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[13px]">
+        <button
+          type="button"
+          onClick={() => {
+            setUseBackup(!useBackup);
+            setError(null);
+          }}
+          className="font-semibold text-brand-magenta hover:underline"
+        >
+          {useBackup ? "Use the authenticator app" : "Use a backup code"}
+        </button>
+        <button type="button" onClick={onStartOver} className="font-semibold text-slate-500 hover:text-brand-navy">
+          {expired ? "Sign in again" : "Start over"}
+        </button>
+      </div>
     </form>
   );
 }

@@ -3,8 +3,12 @@ import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
 import { JwtModule } from "@nestjs/jwt";
 import { PassportModule } from "@nestjs/passport";
+import { MailModule } from "../mail/mail.module";
+import { AccountRecoveryService } from "./account-recovery.service";
 import { ApiKeyAuthService } from "./api-key-auth.service";
 import { AuthController } from "./auth.controller";
+import { InvitationAcceptService } from "./invitation-accept.service";
+import { TwoFactorService } from "./two-factor.service";
 import { AuthService } from "./auth.service";
 import { JwtStrategy } from "./jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
@@ -24,12 +28,15 @@ import { PermissionGuard } from "./guards/permission.guard";
  * protected because it exists, not because someone remembered a decorator.
  */
 @Module({
-  imports: [ConfigModule, PassportModule, JwtModule.register({})],
+  imports: [ConfigModule, PassportModule, JwtModule.register({}), MailModule],
   controllers: [AuthController],
   providers: [
     AuthService,
     JwtStrategy,
     ApiKeyAuthService,
+    TwoFactorService,
+    AccountRecoveryService,
+    InvitationAcceptService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: TenantGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { AuthCard, Field, GradientButton } from "@/components/auth/auth-ui";
+import { AuthCard } from "@/components/auth/auth-ui";
+import { ForgotPasswordForm } from "@/components/auth/recovery-forms";
 
 export const metadata: Metadata = { title: "Forgot Password · Appsgain" };
 
@@ -8,27 +9,10 @@ export default function ForgotPasswordPage() {
   return (
     <AuthCard
       title="Forgot Password?"
-      subtitle="Enter your email address and we'll send you a link to reset your password."
+      subtitle="Enter your workspace and email address, and we'll send you a link to reset your password."
       backHref="/sign-in"
     >
-      <form action="/reset-password" className="space-y-4">
-        <Field
-          label="Email"
-          icon="mail"
-          type="email"
-          placeholder="you@yourcompany.com"
-          autoComplete="email"
-        />
-        <GradientButton type="submit">Send Reset Link</GradientButton>
-      </form>
-
-      <div className="mt-7 flex flex-col items-center text-center">
-        <MailKeyIllustration />
-        <p className="mt-3 text-[14px] font-bold text-brand-navy">Check your inbox</p>
-        <p className="mt-0.5 max-w-[280px] text-[13px] leading-relaxed text-slate-500">
-          We&apos;ll send you a password reset link shortly.
-        </p>
-      </div>
+      <ForgotPasswordForm illustration={<MailKeyIllustration />} />
     </AuthCard>
   );
 }

@@ -287,28 +287,158 @@ export function updateSessionUser(patch: Partial<SessionUser>): void {
   window.dispatchEvent(new Event(SESSION_CHANGED_EVENT));
 }
 
+/** A signed-in session, as every successful sign-in returns it. */
+export interface SignedInSession {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  user: SessionUser;
+}
+
+/** What sign-in returns instead of a session when the account has two-factor authentication. */
+export interface TwoFactorChallenge {
+  twoFactorRequired: true;
+  challengeToken: string;
+  expiresIn: number;
+}
+
+function storeSession(session: SignedInSession): SignedInSession {
+  setAccessToken(session.accessToken);
+  setSessionUser(session.user);
+  try {
+    window.sessionStorage.setItem(REFRESH_KEY, session.refreshToken);
+  } catch {
+    /* the session simply will not survive a token expiry */
+  }
+  return session;
+}
+
+export interface SecurityOverview {
+  emailVerified: boolean;
+  twoFactor: { enabled: boolean; enabledAt: string | null; backupCodesRemaining: number };
+  /** Whether this server can send email, and whether it only writes it to the API log. */
+  mail: { deliverable: boolean; devLog: boolean };
+}
+
+export interface InvitationPreview {
+  email: string;
+  name: string | null;
+  role: string;
+  workspace: { name: string; subdomain: string };
+  invitedBy: string | null;
+  expiresAt: string;
+}
+
 export const authApi = {
   /**
    * Email is unique per workspace, not globally, so the subdomain is part of the
    * credential rather than a nicety. In a deployed environment it comes from the host;
    * on localhost there is no subdomain to read, so the form asks for it.
+   *
+   * Resolves to a session, or — when the account has 2FA — to a challenge that
+   * `completeTwoFactor` turns into one. Nothing is stored until there is a session.
    */
-  async login(input: { subdomain: string; email: string; password: string }) {
-    const response = await apiFetch<{
-      accessToken: string;
-      refreshToken: string;
-      expiresIn: number;
-      user: SessionUser;
-    }>("/auth/login", { method: "POST", body: JSON.stringify(input) });
+  async login(input: {
+    subdomain: string;
+    email: string;
+    password: string;
+  }): Promise<SignedInSession | TwoFactorChallenge> {
+    const response = await apiFetch<SignedInSession | TwoFactorChallenge>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return "twoFactorRequired" in response ? response : storeSession(response);
+  },
 
-    setAccessToken(response.accessToken);
-    setSessionUser(response.user);
-    try {
-      window.sessionStorage.setItem(REFRESH_KEY, response.refreshToken);
-    } catch {
-      /* the session simply will not survive a token expiry */
-    }
-    return response;
+  /** Sign-in step two: a code from the authenticator app, or a backup code. */
+  async completeTwoFactor(input: { challengeToken: string; code: string }): Promise<SignedInSession> {
+    return storeSession(
+      await apiFetch<SignedInSession>("/auth/login/2fa", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+  },
+
+  mailStatus(): Promise<{ deliverable: boolean; devLog: boolean }> {
+    return apiFetch<{ deliverable: boolean; devLog: boolean }>("/auth/mail-status");
+  },
+
+  /** Always succeeds when the request is well-formed, whether or not the account exists. */
+  async forgotPassword(input: { subdomain: string; email: string }): Promise<void> {
+    await apiFetch<void>("/auth/forgot-password", { method: "POST", body: JSON.stringify(input) });
+  },
+
+  checkResetToken(token: string): Promise<{ valid: boolean; email?: string }> {
+    return apiFetch<{ valid: boolean; email?: string }>("/auth/reset-password/check", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+  },
+
+  async resetPassword(input: { token: string; password: string }): Promise<void> {
+    await apiFetch<void>("/auth/reset-password", { method: "POST", body: JSON.stringify(input) });
+  },
+
+  security(): Promise<SecurityOverview> {
+    return apiFetch<SecurityOverview>("/auth/security");
+  },
+
+  sendVerificationCode(): Promise<{ sent: boolean; alreadyVerified: boolean }> {
+    return apiFetch<{ sent: boolean; alreadyVerified: boolean }>("/auth/verify-email/send", {
+      method: "POST",
+    });
+  },
+
+  verifyEmail(code: string): Promise<{ verified: true }> {
+    return apiFetch<{ verified: true }>("/auth/verify-email", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+  },
+
+  /** 2FA step one. The secret comes back once, for the QR code and manual entry. */
+  beginTwoFactor(password: string): Promise<{ secret: string; otpauthUri: string }> {
+    return apiFetch<{ secret: string; otpauthUri: string }>("/auth/2fa/setup", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    });
+  },
+
+  /** 2FA step two. The backup codes come back once, here. */
+  confirmTwoFactor(code: string): Promise<{ backupCodes: string[] }> {
+    return apiFetch<{ backupCodes: string[] }>("/auth/2fa/confirm", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    });
+  },
+
+  async disableTwoFactor(input: { password: string; code: string }): Promise<void> {
+    await apiFetch<void>("/auth/2fa/disable", { method: "POST", body: JSON.stringify(input) });
+  },
+
+  regenerateBackupCodes(input: { password: string; code: string }): Promise<{ backupCodes: string[] }> {
+    return apiFetch<{ backupCodes: string[] }>("/auth/2fa/backup-codes", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  previewInvitation(token: string): Promise<InvitationPreview> {
+    return apiFetch<InvitationPreview>("/auth/invitations/preview", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    });
+  },
+
+  /** Creates the invitee's account and signs it in. */
+  async acceptInvitation(input: { token: string; name: string; password: string }): Promise<SignedInSession> {
+    return storeSession(
+      await apiFetch<SignedInSession>("/auth/invitations/accept", {
+        method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
   },
 
   /**
@@ -1316,7 +1446,45 @@ export const usersApi = {
   deactivate(id: string): Promise<WorkspaceMember> {
     return apiFetch<WorkspaceMember>(`/users/${id}`, { method: "DELETE" });
   },
+
+  invitations(): Promise<PendingInvitation[]> {
+    return apiFetch<PendingInvitation[]>("/users/invitations");
+  },
+
+  /** Emails an invitation. The link also comes back, to pass on by hand if email fails. */
+  invite(input: { email: string; name?: string; role: string }): Promise<InvitationSent> {
+    return apiFetch<InvitationSent>("/users/invitations", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  resendInvitation(id: string): Promise<InvitationSent> {
+    return apiFetch<InvitationSent>(`/users/invitations/${id}/resend`, { method: "POST" });
+  },
+
+  async revokeInvitation(id: string): Promise<void> {
+    await apiFetch<void>(`/users/invitations/${id}`, { method: "DELETE" });
+  },
 };
+
+export interface PendingInvitation {
+  id: string;
+  email: string;
+  name: string | null;
+  role: string;
+  status: "PENDING" | "EXPIRED";
+  invitedBy: { id: string; name: string } | null;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface InvitationSent {
+  invitation: PendingInvitation;
+  link: string;
+  emailSent: boolean;
+  emailError?: string;
+}
 
 // ── calendar ────────────────────────────────────────────────────────────────────────
 
