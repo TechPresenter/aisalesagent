@@ -83,6 +83,13 @@ npm run dev:ai
 | `npm run db:migrate` | Prisma migration against the dev database |
 | `npm run db:studio` | Prisma Studio |
 
+## Deploying
+
+The product runs on Vercel in four environments: DEV, QA, UAT and LIVE. Each has its own
+Git branch (`develop`, `qa`, `uat`, `main`), its own subdomains and its own Neon Postgres
+database, and changes reach LIVE only through QA and UAT. Setup, the release path and
+rollback are in [docs/deployment.md](docs/deployment.md).
+
 ## Layout
 
 ```
@@ -92,7 +99,9 @@ apps/
   ai-service/   Python · FastAPI — LLM orchestration, STT/TTS
 packages/
   shared/       TypeScript types shared by web and api. No runtime dependencies.
-docs/           Specifications, exported from the source .docx files
+docs/           Specifications, exported from the source .docx files; deployment runbook
+deploy/vercel/  Environment variable templates for the two Vercel projects
+scripts/        Vercel's branch filter (which branches deploy)
 docker-compose.yml   Postgres (dev + test) and Redis
 ```
 

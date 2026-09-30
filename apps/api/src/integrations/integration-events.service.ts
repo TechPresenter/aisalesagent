@@ -3,6 +3,7 @@ import type { CalendarEvent, Integration } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import { decryptCredentials } from "../providers/crypto.util";
+import { keepAlive } from "../runtime/vercel";
 import { CALENDAR_SYNC_PROVIDERS, EVENT_RECEIVER_PROVIDERS, catalogEntry } from "./catalog";
 import type { EventEnvelope, PlatformEvent } from "./events/event-types";
 import { readSettings } from "./integration-settings";
@@ -32,6 +33,9 @@ type Outcome = { ok: true } | { ok: false; reason: string };
  * The same holds for failure: nothing here throws into the caller. A delivery that fails is
  * recorded on the webhook's delivery log or the integration's last error, where Settings
  * shows it, and the work that produced the event stands.
+ *
+ * Detached work is wrapped in keepAlive: on Vercel a function can be suspended once its
+ * response is sent, which would otherwise stop a delivery halfway.
  */
 @Injectable()
 export class IntegrationEventsService {
@@ -52,15 +56,19 @@ export class IntegrationEventsService {
       data,
     };
 
-    void this.dispatch(tenantId, envelope).catch((error: unknown) =>
-      this.logger.warn(`Could not dispatch ${event}: ${describe(error)}`),
+    void keepAlive(
+      this.dispatch(tenantId, envelope).catch((error: unknown) =>
+        this.logger.warn(`Could not dispatch ${event}: ${describe(error)}`),
+      ),
     );
   }
 
   /** Mirrors an Appsgain calendar event onto a connected Google or Outlook calendar. */
   syncCalendarEvent(tenantId: string, action: "upsert" | "delete", event: CalendarEvent): void {
-    void this.syncCalendar(tenantId, action, event).catch((error: unknown) =>
-      this.logger.warn(`Could not sync calendar event ${event.id}: ${describe(error)}`),
+    void keepAlive(
+      this.syncCalendar(tenantId, action, event).catch((error: unknown) =>
+        this.logger.warn(`Could not sync calendar event ${event.id}: ${describe(error)}`),
+      ),
     );
   }
 

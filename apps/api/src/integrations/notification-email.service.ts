@@ -3,6 +3,7 @@ import type { NotificationChannel, NotificationType } from "@prisma/client";
 import { DEFAULT_CHANNELS } from "../notifications/notification-preferences.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { decryptCredentials } from "../providers/crypto.util";
+import { keepAlive } from "../runtime/vercel";
 import { EMAIL_PROVIDERS } from "./catalog";
 import { appUrl } from "./events/payloads";
 import { escapeHtml, sendEmail } from "./vendors/email";
@@ -31,11 +32,13 @@ export class NotificationEmailService {
   constructor(private readonly prisma: PrismaService) {}
 
   deliver(tenantId: string, notification: EmailableNotification): void {
-    void this.send(tenantId, notification).catch((error: unknown) =>
-      this.logger.warn(
-        `Could not email a ${notification.type} notification: ${
-          error instanceof Error ? error.message : "unknown error"
-        }`,
+    void keepAlive(
+      this.send(tenantId, notification).catch((error: unknown) =>
+        this.logger.warn(
+          `Could not email a ${notification.type} notification: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`,
+        ),
       ),
     );
   }

@@ -2,6 +2,7 @@ import { Injectable, Logger } from "@nestjs/common";
 import type { JwtAccessPayload } from "@appsgain/shared";
 import { effectiveScopes, hashApiKey, looksLikeApiKey } from "../api-keys/api-key.util";
 import { PrismaService } from "../prisma/prisma.service";
+import { keepAlive } from "../runtime/vercel";
 import { isRole } from "./role-sync";
 
 /** Last-used is a courtesy for the key list, not an audit log; once a minute is plenty. */
@@ -50,13 +51,15 @@ export class ApiKeyAuthService {
     if (!isRole(creator.role)) return null;
 
     if (!key.lastUsedAt || Date.now() - key.lastUsedAt.getTime() > LAST_USED_RESOLUTION_MS) {
-      void this.prisma.apiKey
-        .update({ where: { id: key.id }, data: { lastUsedAt: new Date() } })
-        .catch((error: unknown) =>
-          this.logger.warn(
-            `Could not record API key use: ${error instanceof Error ? error.message : "unknown error"}`,
+      void keepAlive(
+        this.prisma.apiKey
+          .update({ where: { id: key.id }, data: { lastUsedAt: new Date() } })
+          .catch((error: unknown) =>
+            this.logger.warn(
+              `Could not record API key use: ${error instanceof Error ? error.message : "unknown error"}`,
+            ),
           ),
-        );
+      );
     }
 
     return {

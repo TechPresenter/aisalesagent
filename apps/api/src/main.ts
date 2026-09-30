@@ -2,13 +2,22 @@ import "reflect-metadata";
 import { Logger, ValidationPipe, type INestApplication } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { AppModule } from "./app.module";
+import { runningOnVercel } from "./runtime/vercel";
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
   const config = app.get(ConfigService);
 
   app.setGlobalPrefix("api");
+
+  if (runningOnVercel()) {
+    // Vercel replaces X-Forwarded-For with the caller's real address and drops any value the
+    // client sent, so there the header is a fact rather than a claim, and request.ip should
+    // read it instead of reporting Vercel's own proxy.
+    app.set("trust proxy", true);
+  }
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -34,7 +43,9 @@ async function bootstrap(): Promise<void> {
   // finishes on its own; enabling shutdown hooks is what lets PrismaService disconnect.
   app.enableShutdownHooks();
 
-  const port = Number(config.get("API_PORT", 4000));
+  // Vercel tells the function which port to serve on. Everywhere else the API keeps its own
+  // API_PORT, so a PORT meant for the web app's dev server never moves it.
+  const port = Number((runningOnVercel() && process.env.PORT) || config.get("API_PORT", 4000));
   await listenWithRetry(app, port);
 
   new Logger("Bootstrap").log(`API listening on http://localhost:${port}/api`);

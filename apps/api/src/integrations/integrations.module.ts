@@ -1,4 +1,5 @@
 import { Module } from "@nestjs/common";
+import { CronController } from "./cron.controller";
 import { IntegrationEventsService } from "./integration-events.service";
 import { IntegrationsController } from "./integrations.controller";
 import { IntegrationsService } from "./integrations.service";
@@ -16,7 +17,7 @@ import { WebhooksService } from "./webhooks/webhooks.service";
  * calendar) and the notification email sender. Everything else is reached over HTTP.
  */
 @Module({
-  controllers: [IntegrationsController, WebhooksController],
+  controllers: [IntegrationsController, WebhooksController, CronController],
   providers: [
     IntegrationsService,
     WebhooksService,

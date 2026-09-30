@@ -1,0 +1,55 @@
+# Runs the API's background jobs (webhook retries, follow-up reminders) on DEV, QA and UAT.
+#
+# LIVE does not need this: Vercel Cron calls the same route there every minute. Vercel Cron
+# only runs on production deployments, so the pre-release environments are called from
+# here instead, every five minutes — GitHub's shortest schedule, and it can run late.
+#
+# Repository secrets, per environment (an environment without both is skipped):
+#   DEV_API_URL / DEV_CRON_SECRET, QA_API_URL / QA_CRON_SECRET, UAT_API_URL / UAT_CRON_SECRET
+# where *_API_URL is the API's address, e.g. https://api-qa.appsgain.app, and
+# *_CRON_SECRET is the CRON_SECRET set on that environment's API project.
+#
+# Scheduled workflows run from the default branch (main) only, and GitHub pauses them in a
+# public repository after 60 days without commits.
+
+name: Pre-release worker
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  tick:
+    name: Run background jobs on DEV, QA and UAT
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call each environment's worker
+        env:
+          DEV_API_URL: ${{ secrets.DEV_API_URL }}
+          DEV_CRON_SECRET: ${{ secrets.DEV_CRON_SECRET }}
+          QA_API_URL: ${{ secrets.QA_API_URL }}
+          QA_CRON_SECRET: ${{ secrets.QA_CRON_SECRET }}
+          UAT_API_URL: ${{ secrets.UAT_API_URL }}
+          UAT_CRON_SECRET: ${{ secrets.UAT_CRON_SECRET }}
+        run: |
+          failed=0
+          for env in DEV QA UAT; do
+            url_var="${env}_API_URL"; secret_var="${env}_CRON_SECRET"
+            url="${!url_var}"; secret="${!secret_var}"
+            if [ -z "$url" ] || [ -z "$secret" ]; then
+              echo "$env: not configured, skipped."
+              continue
+            fi
+            echo "$env:"
+            if ! curl --silent --show-error --fail-with-body --max-time 120 \
+                 -H "Authorization: Bearer $secret" \
+                 "${url%/}/api/internal/cron/integrations"; then
+              failed=1
+            fi
+            echo
+          done
+          exit $failed

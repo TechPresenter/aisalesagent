@@ -1,11 +1,20 @@
 import { Injectable, Logger, type OnApplicationBootstrap, type OnModuleDestroy } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
+import { runningOnVercel } from "../runtime/vercel";
 import { IntegrationEventsService } from "./integration-events.service";
 import { followUpData, leadData } from "./events/payloads";
 import { WebhookDeliveryService } from "./webhooks/webhook-delivery.service";
 
 /** How often the worker looks for due work. */
 const TICK_MS = 30_000;
+
+/** What one pass of the worker did. */
+export interface WorkerPass {
+  ran: boolean;
+  retried: number;
+  announced: number;
+  error?: string;
+}
 
 /** Follow-ups whose moment passed longer ago than this are not announced late. */
 const FOLLOW_UP_LOOKBACK_MS = 24 * 3_600_000;
@@ -23,6 +32,9 @@ const FOLLOW_UP_LOOKBACK_MS = 24 * 3_600_000;
  * that is safe — a delivery attempt is guarded per process and a follow-up is claimed
  * with a conditional update before it is announced — but it is not a queue, and the
  * Redis-backed job system in the TRD is where this belongs once there is more than one.
+ *
+ * On Vercel there is no process for a timer to live in, so the timer stays off and
+ * CronController runs a pass whenever the scheduler calls it (see docs/deployment.md).
  */
 @Injectable()
 export class IntegrationsWorker implements OnApplicationBootstrap, OnModuleDestroy {
@@ -37,8 +49,10 @@ export class IntegrationsWorker implements OnApplicationBootstrap, OnModuleDestr
   ) {}
 
   onApplicationBootstrap(): void {
-    // Tests drive these jobs directly; a timer would only outlive them.
+    // Tests drive these jobs directly; a timer would only outlive them. On Vercel it could
+    // not run reliably at all.
     if (process.env.NODE_ENV === "test" || process.env.INTEGRATIONS_WORKER === "off") return;
+    if (runningOnVercel()) return;
     this.timer = setInterval(() => void this.tick(), TICK_MS);
     this.timer.unref();
   }
@@ -48,19 +62,22 @@ export class IntegrationsWorker implements OnApplicationBootstrap, OnModuleDestr
     this.timer = null;
   }
 
-  async tick(): Promise<void> {
-    if (this.running) return;
+  /** One pass over both jobs. `ran` is false when a pass was already in progress. */
+  async tick(): Promise<WorkerPass> {
+    const pass: WorkerPass = { ran: false, retried: 0, announced: 0 };
+    if (this.running) return pass;
     this.running = true;
+    pass.ran = true;
     try {
-      await this.retryDeliveries();
-      await this.announceDueFollowUps();
+      pass.retried = await this.retryDeliveries();
+      pass.announced = await this.announceDueFollowUps();
     } catch (error) {
-      this.logger.warn(
-        `Integrations worker pass failed: ${error instanceof Error ? error.message : "unknown error"}`,
-      );
+      pass.error = error instanceof Error ? error.message : "unknown error";
+      this.logger.warn(`Integrations worker pass failed: ${pass.error}`);
     } finally {
       this.running = false;
     }
+    return pass;
   }
 
   async retryDeliveries(): Promise<number> {

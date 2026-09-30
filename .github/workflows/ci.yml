@@ -1,0 +1,93 @@
+# Checks every pull request and every push to an environment branch.
+# Make "Checks", "API integration tests" and "Web production build" required status checks
+# on develop, qa, uat and main (docs/deployment.md, "GitHub branch protection").
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, qa, uat, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Generate the Prisma client
+        run: npm run db:generate
+      - name: Type check (shared, web, API)
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: API unit tests
+        run: npm test
+      - name: Web unit tests
+        run: npm run test --workspace=@appsgain/web
+
+  e2e:
+    name: API integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: appsgain
+          POSTGRES_PASSWORD: appsgain
+          POSTGRES_DB: appsgain_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U appsgain -d appsgain_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # A throwaway database that exists only for this job; the tests truncate it freely.
+      TEST_DATABASE_URL: postgresql://appsgain:appsgain@localhost:5433/appsgain_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:shared
+      - run: npm run db:generate
+      - name: Migrate the test database
+        working-directory: apps/api
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+      - run: npm run test:e2e
+
+  web-build:
+    name: Web production build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:shared
+      # The same `next build` Vercel runs, so a page that only fails in production builds
+      # fails here first. The API address is baked in at build time; any valid URL will do.
+      - name: next build
+        run: npm run build --workspace=@appsgain/web
+        env:
+          NEXT_PUBLIC_API_URL: https://api.example.invalid

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "cd ../.. && npm ci",
+  "buildCommand": "node scripts/vercel-build.mjs",
+  "ignoreCommand": "node ../../scripts/vercel-ignore-build.mjs",
+  "crons": [{ "path": "/api/internal/cron/integrations", "schedule": "* * * * *" }]
+}

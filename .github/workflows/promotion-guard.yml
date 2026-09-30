@@ -1,0 +1,46 @@
+# Enforces the release path DEV → QA → UAT → LIVE: a pull request into qa must come from
+# develop, into uat from qa, and into main from uat. Make "Promotion order" a required
+# status check on qa, uat and main so nothing reaches LIVE without passing QA and UAT.
+
+name: Promotion order
+
+on:
+  pull_request:
+    branches: [qa, uat, main]
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  source-branch:
+    name: Promotion order
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the pull request's source branch
+        env:
+          # Passed as environment variables, never inlined into the script: a branch name
+          # is chosen by whoever opens the pull request.
+          TARGET: ${{ github.base_ref }}
+          SOURCE: ${{ github.head_ref }}
+          SOURCE_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          case "$TARGET" in
+            qa)   expected=develop ;;
+            uat)  expected=qa ;;
+            main) expected=uat ;;
+            *)    echo "No promotion rule for '$TARGET'."; exit 0 ;;
+          esac
+
+          if [ "$SOURCE_REPO" != "$THIS_REPO" ]; then
+            echo "::error::Promotions into '$TARGET' must come from this repository's '$expected' branch, not from a fork."
+            exit 1
+          fi
+
+          if [ "$SOURCE" != "$expected" ]; then
+            echo "::error::Pull requests into '$TARGET' must come from '$expected' (this one comes from '$SOURCE'). Every change reaches LIVE through develop → qa → uat → main."
+            exit 1
+          fi
+
+          echo "OK: $SOURCE → $TARGET"
