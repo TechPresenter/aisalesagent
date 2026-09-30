@@ -19,7 +19,7 @@ substitute the real domain.
 | Vercel environment | Preview, branch `develop` | Preview, branch `qa` | Preview, branch `uat` | Production |
 | Used by | Developers | QA testers | The client and stakeholders | Real users |
 | Access | Password gate | Password gate | Password gate | Public |
-| Background jobs | GitHub Actions, every 5 min | GitHub Actions, every 5 min | GitHub Actions, every 5 min | Vercel Cron, every minute |
+| Background jobs | GitHub Actions, every 5 min | GitHub Actions, every 5 min | GitHub Actions, every 5 min | GitHub Actions, every 5 min, plus Vercel Cron (daily on Hobby, every minute on Pro) |
 
 **How a change moves.**
 1. A feature branch is merged into `develop` and deploys to DEV.
@@ -32,10 +32,13 @@ Vercel builds only these four branches (`scripts/vercel-ignore-build.mjs`). The 
 
 ## What you need before starting
 
-- **Vercel Pro.**
+- **A Vercel account.** The free Hobby plan is enough to build and test all four
+  environments. Move to **Pro** before real customers use LIVE:
   - Vercel's Hobby plan is for personal, non-commercial use.
-  - Hobby cron jobs can run only once a day. The API's every-minute cron makes its
-    deployment fail on Hobby.
+  - Pro lets Vercel Cron run LIVE's background jobs every minute. On Hobby it runs them once
+    a day, and the GitHub workflow covers the rest (see "Background jobs").
+  - To switch, change the schedule in `apps/api/vercel.json` to `* * * * *` after upgrading.
+    A Hobby deployment with that schedule fails.
 - **Neon** for Postgres, either through the Vercel Marketplace or neon.com directly.
 - **The domain**, and access to its DNS settings.
 - **An email provider** (Resend or SendGrid) with a verified sender address.
@@ -82,7 +85,7 @@ The first deployment of each API environment creates its tables (see step 3).
    - the install and build commands (the build checks settings, builds the shared package,
      generates Prisma and runs migrations)
    - the branch filter
-   - the every-minute cron
+   - LIVE's Vercel Cron (daily; every minute once on Pro)
 5. Set **Settings → Deployment Protection** to **None**.
    - The API has its own sign-in.
    - Vercel's protection would block the web app's calls to the DEV, QA and UAT APIs.
@@ -136,10 +139,11 @@ is usually a CNAME to Vercel. Vercel issues and renews the SSL certificates itse
    Branch protection is free on public repositories. On a private repository it needs a
    paid GitHub plan.
 2. **Actions secrets** (Settings → Secrets and variables → Actions), for the
-   pre-release worker:
+   "Background jobs" workflow:
    - `DEV_API_URL` and `DEV_CRON_SECRET`
    - `QA_API_URL` and `QA_CRON_SECRET`
    - `UAT_API_URL` and `UAT_CRON_SECRET`
+   - `LIVE_API_URL` and `LIVE_CRON_SECRET`
 
    Each URL is that environment's API address. Each secret is the `CRON_SECRET` set on that
    environment's API.
@@ -210,15 +214,19 @@ The API retries failed webhook deliveries and announces follow-ups as they come 
 that runs on a 30-second timer. On Vercel no timer survives between requests, so the timer
 is off and a scheduler calls `/api/internal/cron/integrations` instead:
 
-- **LIVE: Vercel Cron, every minute.** The schedule is in `apps/api/vercel.json`. Runs are
-  listed under the API project's **Settings → Cron Jobs**, and a failed run returns HTTP 500.
-- **DEV, QA and UAT: the "Pre-release worker" GitHub workflow, every 5 minutes.** Vercel Cron
-  runs only on production deployments, so this workflow covers the other three.
+- **All four environments: the "Background jobs" GitHub workflow, every 5 minutes.** Each
+  run calls every environment whose URL and secret are set. A failed call marks the run
+  red.
   - GitHub may start scheduled runs late.
   - Scheduled runs happen only from `main`.
   - In a public repository, GitHub pauses the schedule after 60 days without commits.
   - On a private repository these runs use Actions minutes. Lower the schedule, or move the
-    three calls to an external cron service.
+    calls to an external cron service.
+- **LIVE, additionally: Vercel Cron.** The schedule is in `apps/api/vercel.json`.
+  - On Hobby it runs once a day, as a backup in case the GitHub schedule pauses.
+  - On Pro, change it to `* * * * *` so LIVE's jobs run every minute.
+  - Vercel Cron only ever runs on production deployments.
+  - Runs are listed under the API project's **Settings → Cron Jobs**.
 
 Detached work, such as a webhook sent after the response has gone, is kept alive with
 Vercel's `waitUntil` (`apps/api/src/runtime/vercel.ts`). It finishes instead of being
@@ -257,7 +265,7 @@ suspended with the function.
    - `https://api.appsgain.app/api/health/ready` answers `{"status":"ok","database":"up"}`
    - sign in, open the dashboard and leads, create and delete a test lead
    - request a password reset for your own account and receive the email
-   - the next cron run under Settings → Cron Jobs succeeded
+   - the next "Background jobs" run in GitHub Actions shows LIVE succeeding
 
 Urgent fixes take the same path, just quickly. There is no direct route to `main`.
 
@@ -285,8 +293,8 @@ Urgent fixes take the same path, just quickly. There is no direct route to `main
 - **Uptime:** an external monitor (for example Better Stack or UptimeRobot) on
   `https://api.appsgain.app/api/health/ready` and `https://app.appsgain.app`, alerting by
   email or chat.
-- **Background jobs:** the Vercel cron log (LIVE) and the GitHub Actions run history
-  (pre-release).
+- **Background jobs:** the "Background jobs" run history in GitHub Actions (all
+  environments), and the Vercel cron log (LIVE).
 - **Analytics:** Vercel Web Analytics on the web project, if wanted.
 
 ## Limits to know

@@ -3,5 +3,5 @@
   "installCommand": "cd ../.. && npm ci",
   "buildCommand": "node scripts/vercel-build.mjs",
   "ignoreCommand": "node ../../scripts/vercel-ignore-build.mjs",
-  "crons": [{ "path": "/api/internal/cron/integrations", "schedule": "* * * * *" }]
+  "crons": [{ "path": "/api/internal/cron/integrations", "schedule": "0 3 * * *" }]
 }

@@ -1,18 +1,22 @@
-# Runs the API's background jobs (webhook retries, follow-up reminders) on DEV, QA and UAT.
+# Runs the API's background jobs (webhook retries, follow-up reminders) in every environment
+# by calling its worker route every five minutes. That is GitHub's shortest schedule, and
+# GitHub can start a run late.
 #
-# LIVE does not need this: Vercel Cron calls the same route there every minute. Vercel Cron
-# only runs on production deployments, so the pre-release environments are called from
-# here instead, every five minutes — GitHub's shortest schedule, and it can run late.
+# Vercel Cron cannot cover this on the Hobby plan. Hobby allows one run a day, which
+# apps/api/vercel.json uses as LIVE's backup, and Vercel Cron never runs on DEV, QA or UAT.
+# On the Pro plan, set that cron to every minute ("* * * * *"); LIVE then no longer depends
+# on this workflow.
 #
 # Repository secrets, per environment (an environment without both is skipped):
-#   DEV_API_URL / DEV_CRON_SECRET, QA_API_URL / QA_CRON_SECRET, UAT_API_URL / UAT_CRON_SECRET
+#   DEV_API_URL / DEV_CRON_SECRET, QA_API_URL / QA_CRON_SECRET,
+#   UAT_API_URL / UAT_CRON_SECRET, LIVE_API_URL / LIVE_CRON_SECRET
 # where *_API_URL is the API's address, e.g. https://api-qa.appsgain.app, and
 # *_CRON_SECRET is the CRON_SECRET set on that environment's API project.
 #
 # Scheduled workflows run from the default branch (main) only, and GitHub pauses them in a
 # public repository after 60 days without commits.
 
-name: Pre-release worker
+name: Background jobs
 
 on:
   schedule:
@@ -23,7 +27,7 @@ permissions: {}
 
 jobs:
   tick:
-    name: Run background jobs on DEV, QA and UAT
+    name: Run background jobs
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -35,9 +39,11 @@ jobs:
           QA_CRON_SECRET: ${{ secrets.QA_CRON_SECRET }}
           UAT_API_URL: ${{ secrets.UAT_API_URL }}
           UAT_CRON_SECRET: ${{ secrets.UAT_CRON_SECRET }}
+          LIVE_API_URL: ${{ secrets.LIVE_API_URL }}
+          LIVE_CRON_SECRET: ${{ secrets.LIVE_CRON_SECRET }}
         run: |
           failed=0
-          for env in DEV QA UAT; do
+          for env in DEV QA UAT LIVE; do
             url_var="${env}_API_URL"; secret_var="${env}_CRON_SECRET"
             url="${!url_var}"; secret="${!secret_var}"
             if [ -z "$url" ] || [ -z "$secret" ]; then

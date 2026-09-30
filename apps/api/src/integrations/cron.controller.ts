@@ -14,9 +14,9 @@ import { IntegrationsWorker, type WorkerPass } from "./integrations.worker";
 /**
  * Runs the integrations worker on request, for hosts where no timer can (Vercel).
  *
- * Vercel Cron calls GET /api/internal/cron/integrations every minute on production
- * deployments and sends `Authorization: Bearer <CRON_SECRET>`. DEV, QA and UAT have no
- * Vercel Cron, so a scheduled GitHub Actions workflow calls the same route there.
+ * The "Background jobs" GitHub workflow calls GET /api/internal/cron/integrations every
+ * five minutes in every environment. On LIVE, Vercel Cron also calls it: once a day on the
+ * Hobby plan as a backup, every minute on Pro. Both send `Authorization: Bearer <CRON_SECRET>`.
  *
  * `@Public()` only takes the route out of the user-token guards, because no user is
  * involved; the shared secret is the credential. Without CRON_SECRET the route is off.
