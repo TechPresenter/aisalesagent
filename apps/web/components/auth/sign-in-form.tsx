@@ -17,15 +17,15 @@ const CODE_LENGTH = 6;
  *
  * The workspace field exists because email is unique per workspace rather than globally
  * (see `LoginRequest` in @appsgain/shared). A deployed environment reads it from the
- * host; localhost has no subdomain to read, so here it is asked for and defaulted to the
- * seeded workspace.
+ * host; localhost has no subdomain to read, so here it is asked for. Outside production it
+ * defaults to the seeded workspace; a production database has no such workspace.
  *
  * An account with two-factor authentication gets a challenge back instead of a session,
  * and the form becomes step two: a code from the authenticator app, or a backup code.
  */
 export function SignInForm() {
   const router = useRouter();
-  const [subdomain, setSubdomain] = useState("northwind");
+  const [subdomain, setSubdomain] = useState(process.env.NODE_ENV === "production" ? "" : "northwind");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
