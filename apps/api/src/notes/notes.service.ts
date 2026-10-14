@@ -1,6 +1,7 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { NoteType, Prisma, Sentiment, type SalesNote } from "@prisma/client";
 import { hasPermission, type Role } from "@appsgain/shared";
+import { assertInTenant } from "../common/assert-in-tenant";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
 import { scopedCreate } from "../prisma/tenant-scoped";
 
@@ -144,16 +145,14 @@ export class NotesService {
   }): Promise<SalesNote> {
     const { userId } = this.tenantPrisma.context;
 
-    // Checked rather than left to the foreign key: "Foreign key violation" is not
-    // something to show a salesperson, and the scoped client would reject another
-    // tenant's lead id with exactly that.
-    const lead = await this.db.lead.findUnique({ where: { id: input.leadId } });
-    if (!lead) throw new NotFoundException("That lead does not exist in this workspace.");
-
-    if (input.callId) {
-      const call = await this.db.call.findUnique({ where: { id: input.callId } });
-      if (!call) throw new NotFoundException("That call does not exist in this workspace.");
-    }
+    // Every id in the body is checked rather than left to the foreign key. "Foreign key
+    // violation" is not something to show a salesperson, and for the ids the foreign key
+    // does accept — another workspace's campaign exists, after all — it is no check at
+    // all: the note would be saved pointing across the tenant boundary and show that
+    // campaign's name to everyone who reads it.
+    await assertInTenant(this.db.lead, input.leadId, "lead");
+    await assertInTenant(this.db.call, input.callId, "call");
+    await assertInTenant(this.db.campaign, input.campaignId, "campaign");
 
     const note = await this.db.salesNote.create({
       data: scopedCreate<Prisma.SalesNoteUncheckedCreateInput>({

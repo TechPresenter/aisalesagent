@@ -1,63 +1,75 @@
 import type { Metadata } from "next";
-import { Bookmark, Building2, PhoneCall, Plus, Users } from "lucide-react";
+import Link from "next/link";
+import { Sparkles } from "lucide-react";
 import { PageTitle } from "@/components/shared/page-title";
-import { StatStrip, type StatSpec } from "@/components/shared/stat-strip";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { FindLeadsView } from "@/components/discovery/find-leads-view";
-import { discoveryTotals } from "@/lib/mock-discovery";
+import { LeadIntakeActions } from "@/components/leads/add-lead-dialog";
+import { features } from "@/config/features";
 
 export const metadata: Metadata = { title: "Find Leads (AI) · AI Sales Agent" };
 
-const STATS: StatSpec[] = [
-  { id: "found", label: "Clinics Found", value: discoveryTotals.clinicsFound, trend: 32, sparkline: [5200, 6100, 6800, 7400, 8200, 8900, 9600, 10200, 10900, 11500, 12000, 12480], icon: Users, tone: "purple" },
-  { id: "verified", label: "Verified Leads", value: discoveryTotals.verifiedLeads, trend: 28, sparkline: [3400, 4000, 4500, 4900, 5400, 5900, 6300, 6800, 7200, 7600, 7950, 8230], icon: Building2, tone: "green" },
-  { id: "numbers", label: "Contact Numbers", value: discoveryTotals.contactNumbers, trend: 41, sparkline: [1400, 1650, 1900, 2100, 2350, 2550, 2750, 2950, 3150, 3320, 3450, 3560], icon: PhoneCall, tone: "blue" },
-];
-
-/** Feature List §3 — Find Leads (AI). */
+/**
+ * Feature List §3 — Find Leads (AI).
+ *
+ * Discovery needs a licensed source of business data, and there is none yet. So by
+ * default this route is a "coming soon" page that points at the ways leads do get in
+ * today, and nothing in the app links here (config/navigation.ts, the Leads page). With
+ * NEXT_PUBLIC_FEATURE_FIND_LEADS on, it shows the screen's design over sample rows, for
+ * reviewing the flow — still with no figures, because there is nothing to count.
+ */
 export default function FindLeadsPage() {
+  if (!features.findLeads) return <ComingSoon />;
+
   return (
     <>
       <PageTitle
         title="Find Leads (AI)"
-        badge="Beta"
-        subtitle="Use AI to find new clinics, doctors and healthcare businesses."
-        actions={
-          <>
-            <button
-              type="button"
-              disabled
-              title="AI lead discovery is not connected yet."
-              className="inline-flex h-11 cursor-not-allowed items-center gap-2 rounded-btn border border-slate-200 bg-surface px-5 text-[14.5px] font-semibold text-brand-navy opacity-50"
-            >
-              <Bookmark className="h-4 w-4" strokeWidth={2.2} />
-              Saved Searches
-            </button>
-            <button
-              type="button"
-              disabled
-              title="AI lead discovery is not connected yet."
-              className="inline-flex h-11 cursor-not-allowed items-center gap-2 rounded-btn bg-accent-blue px-5 text-[14.5px] font-semibold text-white opacity-50"
-            >
-              <Plus className="h-4 w-4" strokeWidth={2.4} />
-              New Search
-            </button>
-          </>
-        }
+        badge="Preview"
+        subtitle="Use AI to find businesses that match your ideal customer."
       />
 
-      {/* The one thing a visitor to this screen has to know, before the numbers below it
-          are read as the workspace's own. */}
+      {/* The one thing a visitor to this screen has to know, before the rows below are
+          read as the workspace's own. */}
       <p className="mb-5 rounded-btn bg-warning-amber/[0.1] px-4 py-2.5 text-[13px] font-medium text-[#B4761A]">
-        AI lead discovery is not connected yet. Everything on this page is sample data, kept so
-        the flow can be reviewed — nothing here is searched, saved or imported. Real leads come
-        from Leads &rarr; Import, or from the API.
+        AI lead discovery is not available yet. Everything on this page is sample data, kept so the
+        flow can be reviewed — nothing here is searched, saved or imported. Real leads come from
+        Leads &rarr; Add Lead or Import.
       </p>
 
-      <StatStrip stats={STATS} columns={3} />
+      <FindLeadsView />
+    </>
+  );
+}
 
-      <div className="mt-5">
-        <FindLeadsView />
-      </div>
+function ComingSoon() {
+  return (
+    <>
+      <PageTitle
+        title="Find Leads (AI)"
+        badge="Coming soon"
+        subtitle="Use AI to find businesses that match your ideal customer."
+      />
+
+      <Card className="flex flex-col items-center px-6 py-14 text-center">
+        <span className="flex h-12 w-12 items-center justify-center rounded-full bg-accent-purple/[0.13]">
+          <Sparkles className="h-6 w-6 text-accent-purple" strokeWidth={2} />
+        </span>
+        <h2 className="mt-4 text-[19px] font-bold tracking-tight text-brand-navy">
+          AI lead discovery is coming soon
+        </h2>
+        <p className="mt-2 max-w-[460px] text-[13.5px] leading-relaxed text-slate-500">
+          Describe the businesses you want to reach, and review the leads AI finds before any of
+          them join your pipeline. Until then, add leads one at a time or import a CSV file.
+        </p>
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+          <Button variant="ghost" asChild>
+            <Link href="/leads">Go to Leads</Link>
+          </Button>
+          <LeadIntakeActions size="md" />
+        </div>
+      </Card>
     </>
   );
 }

@@ -12,6 +12,7 @@ import { InvitationAcceptService } from "./invitation-accept.service";
 import { TwoFactorService } from "./two-factor.service";
 import { AuthService } from "./auth.service";
 import { SsoService } from "./sso.service";
+import { TenantAccessService } from "./tenant-access.service";
 import { JwtStrategy } from "./jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
 import { TenantGuard } from "./guards/tenant.guard";
@@ -40,12 +41,14 @@ import { PermissionGuard } from "./guards/permission.guard";
     AccountRecoveryService,
     InvitationAcceptService,
     SsoService,
+    TenantAccessService,
     // Behind an abstract token so the tests can swap in a verifier that never calls Clerk.
     { provide: ClerkIdentityVerifier, useClass: ClerkBackendVerifier },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: TenantGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },
   ],
-  exports: [AuthService, SsoService],
+  // TenantAccessService so the operator console can make a status change apply at once.
+  exports: [AuthService, SsoService, TenantAccessService],
 })
 export class AuthModule {}

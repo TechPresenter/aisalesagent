@@ -1,7 +1,9 @@
 import { INestApplication, ValidationPipe } from "@nestjs/common";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import { Test, type TestingModuleBuilder } from "@nestjs/testing";
 import request from "supertest";
 import { AppModule } from "../src/app.module";
+import { configureHttpPipeline } from "../src/common/http-pipeline";
 import { PrismaService } from "../src/prisma/prisma.service";
 
 export interface TestWorkspace {
@@ -27,12 +29,14 @@ export async function createTestApp(
 }> {
   const moduleRef = await override(Test.createTestingModule({ imports: [AppModule] })).compile();
 
-  const app = moduleRef.createNestApplication();
+  const app = moduleRef.createNestApplication<NestExpressApplication>();
   app.setGlobalPrefix("api");
   // Mirrors main.ts. If these drift, the tests stop testing what actually ships.
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
+  // The same function main.ts calls, not a copy: headers, CORS and body limits included.
+  configureHttpPipeline(app);
   await app.init();
 
   return { app, prisma: app.get(PrismaService) };

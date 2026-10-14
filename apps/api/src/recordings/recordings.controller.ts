@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  NotImplementedException,
   Param,
   ParseUUIDPipe,
   Query,
@@ -12,6 +13,7 @@ import {
 import { Type } from "class-transformer";
 import { IsDateString, IsInt, IsOptional, IsString, IsUUID, Max, MaxLength, Min } from "class-validator";
 import { Public, RequirePermissions } from "../auth/decorators";
+import { logOnly } from "../common/all-exceptions.filter";
 import { RecordingsService } from "./recordings.service";
 
 class ListRecordingsDto {
@@ -90,9 +92,10 @@ export class RecordingsController {
    * one recording, expires in minutes, and cannot be edited to point elsewhere without
    * invalidating itself.
    *
-   * Streaming the bytes belongs to whichever object store is configured; until one is,
-   * this refuses rather than pretending. A 501 that says so is better than a 200 with an
-   * empty body, which a player would render as a silent recording.
+   * Streaming the bytes belongs to an object store, and none is built yet, so this
+   * refuses rather than pretending — with a real 501 status, not a 200 whose body says
+   * 501. A player or a download treats any 200 as the audio, and would render this as a
+   * silent recording or save it as a broken file.
    */
   @Get(":id/audio")
   @Public()
@@ -100,17 +103,17 @@ export class RecordingsController {
     @Param("id", ParseUUIDPipe) id: string,
     @Query("expires") expires: string,
     @Query("signature") signature: string,
-  ) {
+  ): never {
     if (!this.recordings.verifySignature(id, Number(expires), signature ?? "")) {
       throw new ForbiddenException("This link is invalid or has expired.");
     }
 
-    return {
-      statusCode: 501,
-      message:
-        "No object storage is configured, so recording audio cannot be served yet. " +
-        "Connect S3 or R2 in Settings → Integrations.",
-    };
+    // A known gap rather than a fault, so it is logged but not sent to Sentry.
+    throw logOnly(
+      new NotImplementedException(
+        "Recording audio is not stored by this app yet, so it cannot be played or downloaded.",
+      ),
+    );
   }
 
   @Delete(":id")

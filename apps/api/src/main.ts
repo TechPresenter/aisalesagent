@@ -4,9 +4,15 @@ import { ConfigService } from "@nestjs/config";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import { AppModule } from "./app.module";
+import { initErrorReporting } from "./common/error-reporting";
+import { configureHttpPipeline } from "./common/http-pipeline";
 import { runningOnVercel } from "./runtime/vercel";
 
 async function bootstrap(): Promise<void> {
+  // Before anything that can fail, so a boot that dies — a database that never answers —
+  // reaches Sentry too. Does nothing unless SENTRY_DSN is set.
+  initErrorReporting();
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true });
   const config = app.get(ConfigService);
 
@@ -31,13 +37,9 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  const origins = config
-    .get<string>("API_CORS_ORIGINS", "http://localhost:3000")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-
-  app.enableCors({ origin: origins, credentials: true });
+  // Security headers, CORS and the lead import's larger body limit. Shared with the e2e
+  // tests, and it has to come before listen(), which is when Nest adds its own parsers.
+  configureHttpPipeline(app);
 
   // Nest's default is to leave the process running after a SIGTERM until in-flight work
   // finishes on its own; enabling shutdown hooks is what lets PrismaService disconnect.
@@ -76,4 +78,10 @@ async function listenWithRetry(app: INestApplication, port: number, attempts = 1
   }
 }
 
-void bootstrap();
+void bootstrap().catch((error: unknown) => {
+  // bufferLogs holds every line until listen() succeeds, and a boot that fails never gets
+  // there — so without this the database retry warnings and the reason for giving up
+  // vanish with the process. The error is rethrown to fail the boot exactly as before.
+  Logger.flush();
+  throw error;
+});

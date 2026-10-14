@@ -11,7 +11,7 @@ export function RecentLeadsCard({ leads, loading }: { leads: Lead[]; loading?: b
   const columns: Column<Lead>[] = [
     {
       key: "name",
-      header: "Name / Clinic",
+      header: "Lead / Company",
       className: "font-semibold",
       cell: (row) => (
         <Link href={`/leads/${row.id}`} className="hover:text-brand-green">

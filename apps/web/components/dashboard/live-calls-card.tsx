@@ -36,7 +36,7 @@ export function LiveCallsCard({
       className: "tabular font-medium",
       cell: (row) => row.phone,
     },
-    { key: "clinic", header: "Clinic / Name", cell: (row) => row.clinicName },
+    { key: "lead", header: "Lead / Company", cell: (row) => row.clinicName },
     { key: "city", header: "City", className: "text-slate-500", cell: (row) => row.city },
     {
       key: "duration",

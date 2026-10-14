@@ -148,6 +148,115 @@ describe("Tenant isolation", () => {
     });
   });
 
+  describe("linking to another tenant's records from a request body", () => {
+    // A different attack from an id in the URL. The row being written is the caller's
+    // own, so the scoped client lets the write through, and only the foreign key stands
+    // in the way — which accepts any workspace's campaign or member. Stored, the link
+    // would show the other workspace's names through every include that follows it.
+    let alphaCampaignId: string;
+    let betaCampaignId: string;
+
+    beforeEach(async () => {
+      alphaCampaignId = (
+        await prisma.campaign.create({ data: { tenantId: alpha.tenantId, name: "Alpha Outreach" } })
+      ).id;
+      betaCampaignId = (
+        await prisma.campaign.create({ data: { tenantId: beta.tenantId, name: "Beta Launch" } })
+      ).id;
+    });
+
+    const note = (extra: Record<string, unknown>) => ({
+      leadId: alphaLeadId,
+      content: "Spoke to the practice manager.",
+      ...extra,
+    });
+
+    const event = (extra: Record<string, unknown> = {}) => ({
+      title: "Demo",
+      startAt: "2026-11-02T10:00:00.000Z",
+      endAt: "2026-11-02T10:30:00.000Z",
+      ...extra,
+    });
+
+    it("refuses a note filed under another tenant's campaign, or on its lead", async () => {
+      await request(app.getHttpServer())
+        .post("/api/notes")
+        .set(authed(alpha))
+        .send(note({ campaignId: betaCampaignId }))
+        .expect(404);
+
+      await request(app.getHttpServer())
+        .post("/api/notes")
+        .set(authed(alpha))
+        .send(note({ leadId: betaLeadId }))
+        .expect(404);
+
+      expect(await prisma.salesNote.count()).toBe(0);
+    });
+
+    it("still files a note under the caller's own campaign", async () => {
+      const created = await request(app.getHttpServer())
+        .post("/api/notes")
+        .set(authed(alpha))
+        .send(note({ campaignId: alphaCampaignId }))
+        .expect(201);
+
+      expect(created.body.campaignId).toBe(alphaCampaignId);
+    });
+
+    it("refuses a calendar event owned by another tenant's member or under its campaign", async () => {
+      await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event({ ownerId: beta.ownerId }))
+        .expect(404);
+
+      await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event({ campaignId: betaCampaignId }))
+        .expect(404);
+
+      expect(await prisma.calendarEvent.count()).toBe(0);
+
+      // The same body with the caller's own ids goes through, so the 404s above are the
+      // check and not a broken route.
+      const own = await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event({ ownerId: alpha.ownerId, campaignId: alphaCampaignId }))
+        .expect(201);
+      expect(own.body.ownerId).toBe(alpha.ownerId);
+      expect(own.body.campaignId).toBe(alphaCampaignId);
+    });
+
+    it("refuses to hand an existing event to another tenant's member", async () => {
+      const created = await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event())
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .patch(`/api/calendar/events/${created.body.id}`)
+        .set(authed(alpha))
+        .send({ ownerId: beta.ownerId })
+        .expect(404);
+
+      const row = await prisma.calendarEvent.findUnique({ where: { id: created.body.id } });
+      expect(row?.ownerId).toBe(alpha.ownerId);
+
+      // Clearing the owner is not a foreign id and still works.
+      await request(app.getHttpServer())
+        .patch(`/api/calendar/events/${created.body.id}`)
+        .set(authed(alpha))
+        .send({ ownerId: null })
+        .expect(200);
+      const cleared = await prisma.calendarEvent.findUnique({ where: { id: created.body.id } });
+      expect(cleared?.ownerId).toBeNull();
+    });
+  });
+
   describe("de-duplication is scoped to the workspace", () => {
     it("rejects a phone number the workspace already holds", async () => {
       await request(app.getHttpServer())

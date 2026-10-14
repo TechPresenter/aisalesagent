@@ -20,7 +20,7 @@ import type {
 } from "@appsgain/shared";
 import { AccountRecoveryService } from "./account-recovery.service";
 import { AuthService, sessionContext, type SessionSummary } from "./auth.service";
-import { CurrentUser, Public } from "./decorators";
+import { AllowWhenSuspended, CurrentUser, Public } from "./decorators";
 import {
   AcceptInvitationDto,
   ChangePasswordDto,
@@ -47,8 +47,13 @@ import type { TenantContext } from "../prisma/tenant-prisma.provider";
 /**
  * TRD §8 — /auth. Enterprise SSO (SAML, `POST /auth/sso`) is not part of this phase;
  * signing in with Google or Microsoft, brokered by Clerk, is — under `/auth/sso/clerk`.
+ *
+ * Every route here stays open to a suspended workspace: what is not public is a person
+ * looking after their own account (password, sessions, two-factor, email), which matters
+ * most exactly when something is wrong with the workspace.
  */
 @Controller("auth")
+@AllowWhenSuspended()
 export class AuthController {
   constructor(
     private readonly auth: AuthService,

@@ -1,9 +1,11 @@
 import { BadRequestException, ConflictException, Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { Prisma } from "@prisma/client";
 import type { CreateWorkspaceResponse, Role, TenantSummary } from "@appsgain/shared";
 import { PrismaService } from "../prisma/prisma.service";
 import { AuthService, type SessionContext } from "../auth/auth.service";
 import { SsoService } from "../auth/sso.service";
+import { readCreditPolicy, trialEndsAt } from "../credits/credit-policy";
 import { CreateWorkspaceDto, RESERVED_SUBDOMAINS } from "./dto/create-workspace.dto";
 
 @Injectable()
@@ -14,6 +16,7 @@ export class WorkspaceService {
     private readonly prisma: PrismaService,
     private readonly auth: AuthService,
     private readonly sso: SsoService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -45,6 +48,9 @@ export class WorkspaceService {
             subdomain: dto.subdomain,
             industryVertical: dto.industryVertical ?? null,
             status: "TRIAL",
+            // TRIAL_DAYS from now, or null (a trial that does not expire) while it is unset.
+            // TenantGuard makes the workspace read-only once this passes.
+            trialEndsAt: trialEndsAt(readCreditPolicy({ TRIAL_DAYS: this.config.get<string>("TRIAL_DAYS") })),
             // TRD §12 — a workspace is renderable from the moment it exists; the owner
             // edits these later under /workspace/branding.
             brandingConfig: {

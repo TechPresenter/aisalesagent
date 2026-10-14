@@ -48,6 +48,8 @@ export interface ApiLead {
   temperature: "HOT" | "WARM" | "COLD";
   ownerId: string | null;
   customFields: Record<string, unknown> | null;
+  /** Never dialled while set, whatever a campaign says. */
+  doNotCall: boolean;
   lastContactedAt: string | null;
   convertedAt: string | null;
   createdAt: string;
@@ -66,9 +68,19 @@ export interface ImportSummary {
   imported: number;
   duplicatesInFile: { sourceRow: number; reason: string; value?: string }[];
   duplicatesInDatabase: { sourceRow: number; reason: string; value?: string }[];
+  /** Rows whose number is on the workspace's do-not-call list. */
+  suppressed?: { sourceRow: number; reason: string; value?: string }[];
   rejected: { sourceRow: number; reason: string; value?: string }[];
+  /** How many numbers the file itself marks do-not-call. */
+  doNotCall?: number;
   dryRun: boolean;
 }
+
+/**
+ * Why a workspace may contact a lead — LAWFUL_BASES in the API's lead DTO. An import
+ * commit must name one; a single lead may.
+ */
+export type LawfulBasis = "CONSENT" | "EXISTING_RELATIONSHIP" | "LEGITIMATE_INTEREST";
 
 export type LeadActivityType =
   | "CREATED" | "UPDATED" | "STATUS_CHANGED" | "SCORE_CHANGED" | "ASSIGNED"
@@ -628,7 +640,14 @@ export const leadsApi = {
     return apiFetch<ApiLead>(`/leads/${id}`);
   },
 
-  create(input: { name: string; phone: string; city?: string }): Promise<ApiLead> {
+  create(input: {
+    name: string;
+    phone: string;
+    city?: string;
+    source?: LeadSource;
+    status?: LeadStatus;
+    lawfulBasis?: LawfulBasis;
+  }): Promise<ApiLead> {
     return apiFetch<ApiLead>("/leads", { method: "POST", body: JSON.stringify(input) });
   },
 
@@ -642,6 +661,8 @@ export const leadsApi = {
       status: LeadStatus;
       score: number;
       customFields: Record<string, unknown>;
+      /** Setting it also puts the number on the do-not-call list. */
+      doNotCall: boolean;
     }>,
   ) {
     return apiFetch<ApiLead>(`/leads/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
@@ -656,11 +677,17 @@ export const leadsApi = {
     return apiFetch<void>(`/leads/${id}`, { method: "DELETE" });
   },
 
+  /**
+   * A dry run needs only the file and mapping. A commit also carries the uploader's
+   * attestation and the lawful basis it rests on, and the API refuses one without them.
+   */
   import(input: {
     csv: string;
     mapping: Record<string, string>;
     source?: LeadSource;
     dryRun?: boolean;
+    attestation?: boolean;
+    lawfulBasis?: LawfulBasis;
   }): Promise<ImportSummary> {
     return apiFetch<ImportSummary>("/leads/import", {
       method: "POST",

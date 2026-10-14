@@ -21,6 +21,7 @@ describe("API key scopes", () => {
       "roles.manage",
       "billing.manage",
       "credits.manage",
+      "credits.adjust",
       "settings.manage",
       "integrations.manage",
       "webhooks.manage",

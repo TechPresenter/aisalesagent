@@ -74,7 +74,13 @@ model Tenant {
   industryVertical String?      @map("industry_vertical")
   /// TRD §12 — the white-label payload the web app renders itself from.
   brandingConfig   Json?        @map("branding_config")
+  /// Enforced by TenantGuard: SUSPENDED is read-only (plus billing and the caller's own
+  /// account security), CANCELLED is refused outright. Changed only by the operator
+  /// console (src/admin), never by the workspace itself.
   status           TenantStatus @default(TRIAL)
+  /// When a TRIAL workspace stops being able to write, as SUSPENDED does. Null means the
+  /// trial does not expire, which is what every workspace gets while TRIAL_DAYS is unset.
+  trialEndsAt      DateTime?    @map("trial_ends_at")
   timezone         String       @default("Asia/Kolkata")
   currency         String       @default("INR")
   /// Set once onboarding completes, so the shell knows whether to resume the wizard.
@@ -124,6 +130,8 @@ model Tenant {
   backupCodes       BackupCode[]
   callSettings      CallSettings?
   aiSettings        AiSettings?
+  suppressions      Suppression[]
+  importBatches     ImportBatch[]
 
   @@map("tenants")
 }
@@ -177,6 +185,8 @@ model User {
   settings          UserSettings?
   notificationPreferences NotificationPreference[]
   twoFactor         TwoFactorAuth?
+  suppressions      Suppression[]
+  importBatches     ImportBatch[]
 
   /// Per-workspace, not global: the same person may hold an account in two workspaces,
   /// which is why login takes a subdomain alongside the email.
@@ -328,15 +338,28 @@ model Lead {
   customFields  Json?           @map("custom_fields")
   /// Compliance (§13): a lead on the do-not-call list is never dialled, whatever a
   /// campaign says. Enforced in the calling pipeline, stored here so it survives
-  /// re-import.
+  /// re-import. Setting it also writes a Suppression row, which is what outlives the
+  /// lead itself: deleting the lead must not quietly make the number callable again.
   doNotCall     Boolean         @default(false) @map("do_not_call")
+  /// Why this workspace may contact the lead: one of LAWFUL_BASES in
+  /// src/leads/dto/lead.dto.ts. A string rather than an enum because the list is
+  /// counsel's to settle, and changing it should be a code change, not a migration.
+  /// Null for leads that predate the field.
+  lawfulBasis   String?         @map("lawful_basis")
+  /// When the lead agreed to be contacted, if they did, as the workspace recorded it.
+  /// Never inferred: the moment a file was imported is not the moment consent was given.
+  consentCapturedAt DateTime?   @map("consent_captured_at")
+  /// The import that created this lead. The batch carries the attestation behind it —
+  /// who uploaded the file, from where, and on what basis.
+  importBatchId String?         @map("import_batch_id")
   lastContactedAt DateTime?     @map("last_contacted_at")
   convertedAt   DateTime?       @map("converted_at")
   createdAt     DateTime        @default(now()) @map("created_at")
   updatedAt     DateTime        @updatedAt @map("updated_at")
 
-  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  owner  User?  @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  owner       User?        @relation("LeadOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  importBatch ImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
 
   tags           LeadTag[]
   activities     LeadActivity[]
@@ -357,7 +380,112 @@ model Lead {
   @@index([tenantId, score])
   @@index([tenantId, createdAt])
   @@index([tenantId, lastContactedAt])
+  @@index([importBatchId])
   @@map("leads")
+}
+
+/// Where a "never call this number" came from, which also decides who may take it back.
+///
+/// OUTCOME — the person said so on a call. IMPORT — a do-not-call column in an uploaded
+/// file. Both are the person's decision, and no edit in the workspace undoes them.
+///
+/// SETTINGS — a manager listed the number under Settings → Calls → Blocked numbers. Only
+/// that list adds or removes these, and it needs calling.manage; the lead's do-not-call
+/// switch, which anyone with leads.edit can flip, cannot clear one.
+///
+/// MANUAL — someone switched a lead to do-not-call. LEAD_DELETE — a lead marked
+/// do-not-call was erased and nothing else held its number, so the mark was kept when
+/// everything else about them went. Both are the workspace's own mark on a lead, and
+/// switching the lead back to callable removes them.
+enum SuppressionSource {
+  OUTCOME
+  MANUAL
+  IMPORT
+  LEAD_DELETE
+  SETTINGS
+}
+
+/// The workspace's do-not-call list: numbers it must never dial, whatever a lead row, a
+/// campaign or an import says.
+///
+/// Keyed by number rather than by lead on purpose. An opt-out belongs to the person on
+/// the other end of the line, and a lead row is only the workspace's current note about
+/// them: it can be deleted, re-imported or edited onto a different number. Every one of
+/// those must leave the opt-out standing, which a flag on the lead alone cannot do.
+///
+/// One row per number *and source*: a number can be blocked in Settings and marked on its
+/// lead at the same time, and each must survive the other being taken back. Removing a
+/// number from the Settings list must not undo a person's opt-out, and switching a lead
+/// back to callable must not undo a manager's block. A number is suppressed while it has
+/// any row at all.
+///
+/// Replaces CallSettings.blockedNumbers, which was a capped array on a settings row.
+model Suppression {
+  id          String            @id @default(uuid())
+  tenantId    String            @map("tenant_id")
+  /// Normalised exactly as Lead.phone is (normalisePhone in src/leads/leads.dedupe.ts),
+  /// so a lookup by a lead's number is one equality on an index — the unique index below
+  /// leads with (tenant_id, phone), which serves it.
+  phone       String
+  source      SuppressionSource
+  reason      String?
+  /// Who added it, when a person did. Null for an outcome or a migrated entry.
+  createdById String?           @map("created_by_id")
+  createdAt   DateTime          @default(now()) @map("created_at")
+
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?  @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, phone, source])
+  @@index([tenantId])
+  @@map("suppressions")
+}
+
+/// One committed CSV import, and the attestation the uploader gave for it.
+///
+/// This is the record that answers "on what basis were these people called?" months
+/// later, so it holds what the uploader could not dispute — who, from which address, the
+/// fingerprint of the exact file and the version of the wording they agreed to — and
+/// nothing of the file's contents. The leads point here; the batch does not list them.
+model ImportBatch {
+  id                 String     @id @default(uuid())
+  tenantId           String     @map("tenant_id")
+  userId             String?    @map("user_id")
+  /// Denormalised so the batch still names someone after the user row is gone.
+  userEmail          String?    @map("user_email")
+  ipAddress          String?    @map("ip_address")
+  userAgent          String?    @map("user_agent")
+  /// SHA-256 of the CSV text this request carried, computed by the API. When the browser
+  /// sends a big file in several requests, each is a batch of its own and this is the
+  /// hash of that piece, re-serialised — which no file on the uploader's disk matches.
+  csvSha256          String     @map("csv_sha256")
+  /// SHA-256 of the file the uploader picked, as the browser hashed it before splitting
+  /// it. The API never sees the whole file, so this is the client's statement rather than
+  /// something checked here; it is what can be matched against the file itself later.
+  /// Null when the client did not send it.
+  fileSha256         String?    @map("file_sha256")
+  /// One id per upload, generated by the browser and sent with every piece of it, so the
+  /// batches of one file can be read back as one import.
+  uploadId           String?    @map("upload_id")
+  /// Data rows in this request, header excluded.
+  rowCount           Int        @map("row_count")
+  importedCount      Int        @default(0) @map("imported_count")
+  source             LeadSource
+  /// One of LAWFUL_BASES, chosen by the uploader for every lead in the file.
+  lawfulBasis        String     @map("lawful_basis")
+  /// Which wording of the attestation was shown (IMPORT_ATTESTATION_VERSION).
+  attestationVersion String     @map("attestation_version")
+  /// The counts the import reported back: duplicates, rejects, suppressed numbers.
+  summary            Json?
+  createdAt          DateTime   @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+  leads  Lead[]
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, uploadId])
+  @@map("import_batches")
 }
 
 model Tag {
@@ -476,7 +604,12 @@ model Campaign {
   dailyCallLimit    Int?     @map("daily_call_limit")
   callWindowStart   Int?     @map("call_window_start")
   callWindowEnd     Int?     @map("call_window_end")
-  timezone          String   @default("Asia/Kolkata")
+  /// An IANA zone, or null for "the workspace's calling timezone" (CallSettings.timezone),
+  /// which is what a new campaign gets unless it names one. Nullable rather than defaulted
+  /// to a fixed zone: the gate falls back to the workspace's zone only when this is empty,
+  /// and a hard-coded default meant that fallback never ran — a workspace in Dubai got
+  /// campaigns judged against Indian hours.
+  timezone          String?
   language          String   @default("en")
   maxAttempts       Int      @default(3) @map("max_attempts")
   retryDelayMinutes Int      @default(240) @map("retry_delay_minutes")
@@ -1183,6 +1316,14 @@ model CreditWallet {
 }
 
 /// Append-only. Rows are never updated or deleted — a correction is another row.
+///
+/// A grant is applied at most once per reference: the migration that added the trial
+/// grant also added a partial unique index, `credit_transactions_grant_reference_key`, on
+/// (tenant_id, reference_type, reference_id) for CREDIT rows of PURCHASE, PLAN_GRANT and
+/// MANUAL_ADJUSTMENT. Partial, because charges and refunds legitimately repeat a
+/// reference (every call to one lead is charged against that lead), and Prisma cannot
+/// declare a partial index here; it leaves one it did not create alone, so the next
+/// `migrate dev` will not try to drop it. Rows without a reference are never constrained.
 model CreditTransaction {
   id            String          @id @default(uuid())
   tenantId      String          @map("tenant_id")
@@ -1777,6 +1918,18 @@ model CallSettings {
   // Compliance. The defaults are the conservative choice on purpose: a workspace has to
   // opt *out* of announcing that a call is recorded, not remember to opt in.
   dncEnabled            Boolean  @default(true) @map("dnc_enabled")
+  /// Superseded by Suppression: the migration that created that table copied these
+  /// numbers into it as SETTINGS rows, and nothing reads this column any more. The API
+  /// answers `blockedNumbers` on /call-settings from the suppression list.
+  ///
+  /// It is still *written*: every Settings save mirrors the SETTINGS rows into it. The
+  /// release before this one reads it, and that is the release an instant rollback
+  /// returns to, which should find the list as it was left, not as it was on migration
+  /// day. Numbers the old release saved here during the deploy window, or after a
+  /// rollback, are copied across by scripts/backfill-suppressions.mjs, which is safe to
+  /// run any number of times.
+  ///
+  /// Drop it once no release that reads it can come back.
   blockedNumbers        String[] @default([]) @map("blocked_numbers")
   allowedCountries      String[] @default([]) @map("allowed_countries")
   recordingAnnouncement Boolean  @default(true) @map("recording_announcement")

@@ -8,13 +8,12 @@ import {
   Gem,
   Headphones,
   Send,
-  ShieldCheck,
   X,
   Zap,
   type LucideIcon,
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
-import { tenantBranding } from "@/config/branding";
+import { appBrand } from "@/config/app-brand";
 import {
   YEARLY_DISCOUNT,
   compareRows,
@@ -26,6 +25,7 @@ import {
   type PlanIcon,
 } from "@/lib/mock-plans";
 import { TONE_HEX, type Tone } from "@/lib/status";
+import { supportContactLinks, type ContactLink } from "@/lib/support-contact";
 import { cn, formatNumber } from "@/lib/utils";
 
 const PLAN_ICON: Record<PlanIcon, LucideIcon> = {
@@ -35,9 +35,23 @@ const PLAN_ICON: Record<PlanIcon, LucideIcon> = {
   enterprise: Gem,
 };
 
-/** Feature List §13 — Plans & Billing. */
+/**
+ * Feature List §13 — Plans & Billing.
+ *
+ * Talking to sales is the one thing on this page that works before billing does, so its
+ * buttons are real mailto: and tel: links to the vendor's support contact. Until that
+ * contact is configured there is nothing to link to, and the help cards are left out
+ * rather than shown with a button that does nothing.
+ *
+ * There used to be a 30-day money-back card here. It promised a refund no policy stands
+ * behind, so it stays off the page until a refund policy is published.
+ */
 export function PlansView() {
   const [period, setPeriod] = useState<BillingPeriod>("monthly");
+  const contact = { email: appBrand.supportEmail, phone: appBrand.supportPhone };
+  const salesLinks = supportContactLinks(contact, `${appBrand.name} plans enquiry`);
+  const customLinks = supportContactLinks(contact, `${appBrand.name} custom plan enquiry`);
+  const hasContact = salesLinks.length > 0;
 
   return (
     <>
@@ -53,8 +67,8 @@ export function PlansView() {
             Choose the Right Plan for Your Growth
           </h1>
           <p className="mt-1.5 text-[14px] text-slate-500">
-            Flexible plans designed for clinics, healthcare businesses and sales teams of all
-            sizes.
+            Flexible plans for sales teams of every size, from a first campaign to a full calling
+            operation.
           </p>
         </div>
 
@@ -79,44 +93,64 @@ export function PlansView() {
 
       <div className="grid grid-cols-1 items-start gap-5 md:grid-cols-2 xl:grid-cols-4">
         {plans.map((plan) => (
-          <PlanCard key={plan.id} plan={plan} period={period} />
+          <PlanCard key={plan.id} plan={plan} period={period} salesLinks={salesLinks} />
         ))}
       </div>
 
-      <div className="mt-5 grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_364px]">
+      <p className="mt-3 text-[12px] text-slate-500">{appBrand.priceTaxNote}</p>
+
+      <div
+        className={cn(
+          "mt-5 grid grid-cols-1 items-start gap-5",
+          hasContact && "xl:grid-cols-[minmax(0,1fr)_364px]",
+        )}
+      >
         <ComparisonTable />
 
-        <div className="space-y-5">
-          <HelpCard
-            icon={Headphones}
-            tone="blue"
-            title="Need Help Choosing?"
-            body="Our team can help you find the perfect plan for your clinic's needs."
-            action="Talk to Sales"
-          />
-          <HelpCard
-            icon={ShieldCheck}
-            tone="green"
-            title="30-Day Money Back Guarantee"
-            body={`Try ${tenantBranding.tenantName} risk-free. If you're not satisfied, get a full refund within 30 days.`}
-          />
-          <HelpCard
-            icon={Zap}
-            tone="purple"
-            title="Custom Requirements?"
-            body="Need a tailored solution? We offer custom plans for hospitals, chains and enterprise clients."
-            action="Contact Us"
-          />
-        </div>
+        {hasContact && (
+          <div className="space-y-5">
+            <HelpCard
+              icon={Headphones}
+              tone="blue"
+              title="Need Help Choosing?"
+              body={`The ${appBrand.name} team can help you pick the plan that fits your call volume and team.`}
+              action="Talk to Sales"
+              links={salesLinks}
+            />
+            <HelpCard
+              icon={Zap}
+              tone="purple"
+              title="Custom Requirements?"
+              body="Need a tailored solution? We offer custom plans for large teams, multi-location businesses and enterprises."
+              action="Contact Us"
+              links={customLinks}
+            />
+          </div>
+        )}
       </div>
     </>
   );
 }
 
-function PlanCard({ plan, period }: { plan: Plan; period: BillingPeriod }) {
+function PlanCard({
+  plan,
+  period,
+  salesLinks,
+}: {
+  plan: Plan;
+  period: BillingPeriod;
+  salesLinks: ContactLink[];
+}) {
   const Icon = PLAN_ICON[plan.icon];
   const price = priceFor(plan, period);
   const hex = TONE_HEX[plan.tone];
+  // A quoted plan is bought by talking to sales, which works without billing. A listed
+  // plan is bought through checkout, which does not exist yet.
+  const quoteHref = price === null ? salesLinks[0]?.href : undefined;
+  const ctaClass = cn(
+    "mt-4 flex h-11 w-full items-center justify-center rounded-btn text-[14px] font-semibold",
+    plan.featured ? "bg-accent-blue text-white" : "border border-slate-200 text-accent-blue",
+  );
 
   return (
     <Card
@@ -168,19 +202,31 @@ function PlanCard({ plan, period }: { plan: Plan; period: BillingPeriod }) {
         )}
       </div>
 
-      <button
-        type="button"
-        disabled
-        title="Billing is not connected yet, so plans cannot be bought from the app."
-        className={cn(
-          "mt-4 flex h-11 w-full cursor-not-allowed items-center justify-center rounded-btn text-[14px] font-semibold opacity-60",
-          plan.featured
-            ? "bg-accent-blue text-white"
-            : "border border-slate-200 text-accent-blue",
-        )}
-      >
-        {plan.cta}
-      </button>
+      {quoteHref ? (
+        <a
+          href={quoteHref}
+          className={cn(
+            ctaClass,
+            "transition-colors",
+            plan.featured ? "hover:bg-[#1B6CD8]" : "hover:bg-accent-blue/[0.06]",
+          )}
+        >
+          {plan.cta}
+        </a>
+      ) : (
+        <button
+          type="button"
+          disabled
+          title={
+            price === null
+              ? "Sales contact details are not published yet."
+              : "Billing is not connected yet, so plans cannot be bought from the app."
+          }
+          className={cn(ctaClass, "cursor-not-allowed opacity-60")}
+        >
+          {plan.cta}
+        </button>
+      )}
 
       <ul className="mt-4 flex-1 space-y-2.5">
         {plan.features.map((feature) => (
@@ -309,20 +355,27 @@ const HELP_TONE: Record<"blue" | "green" | "purple", string> = {
   purple: "bg-accent-purple/[0.06]",
 };
 
+/**
+ * A help card whose action is a link to the vendor: the first contact is the button, a
+ * second one (the phone, when there is an email too) a line of text under it.
+ */
 function HelpCard({
   icon: Icon,
   tone,
   title,
   body,
   action,
+  links,
 }: {
   icon: LucideIcon;
   tone: "blue" | "green" | "purple";
   title: string;
   body: string;
-  action?: string;
+  action: string;
+  links: ContactLink[];
 }) {
   const hex = TONE_HEX[tone as Tone];
+  const [primary, secondary] = links;
 
   return (
     <Card className={cn("flex gap-3 p-4", HELP_TONE[tone])}>
@@ -335,15 +388,24 @@ function HelpCard({
       <div className="min-w-0">
         <h3 className="text-[14px] font-bold text-brand-navy">{title}</h3>
         <p className="mt-1 text-[12.5px] leading-relaxed text-slate-600">{body}</p>
-        {action && (
-          <button
-            type="button"
-            disabled
-            title="Billing is not connected yet."
-            className="mt-2.5 flex h-9 w-full cursor-not-allowed items-center justify-center rounded-btn bg-accent-blue px-4 text-[13px] font-semibold text-white opacity-60"
+        {primary && (
+          <a
+            href={primary.href}
+            className="mt-2.5 flex h-9 w-full items-center justify-center rounded-btn bg-accent-blue px-4 text-[13px] font-semibold text-white transition-colors hover:bg-[#1B6CD8]"
           >
             {action}
-          </button>
+          </a>
+        )}
+        {secondary && (
+          <p className="mt-1.5 text-center text-[12px] text-slate-500">
+            or {secondary.kind === "phone" ? "call" : "write to"}{" "}
+            <a
+              href={secondary.href}
+              className="tabular font-semibold text-accent-blue hover:underline"
+            >
+              {secondary.display}
+            </a>
+          </p>
         )}
       </div>
     </Card>
