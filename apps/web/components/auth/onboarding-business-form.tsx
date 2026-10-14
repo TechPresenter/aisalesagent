@@ -6,19 +6,34 @@ import { ChevronDown, Loader2 } from "lucide-react";
 import { GradientButton } from "@/components/auth/auth-ui";
 import { ApiError, updateSessionUser, workspaceApi } from "@/lib/api-client";
 
-/** The industry templates the workspace can be set up against (TRD §7 custom fields). */
+/**
+ * The industry templates the workspace can be set up against (TRD §7 custom fields).
+ *
+ * The product sells to any business that calls its leads, so the list covers the common
+ * B2B verticals, with healthcare as one entry among them rather than the whole list. The
+ * API stores the choice as free text, so adding a vertical here needs no migration.
+ */
 const INDUSTRIES = [
   "IT Services",
-  "Dental Clinic",
-  "Multispeciality Hospital",
-  "Diagnostic Lab",
-  "Pharmacy",
+  "Software & SaaS",
+  "Real Estate",
+  "Education & Training",
+  "Financial Services",
+  "Insurance",
+  "Healthcare",
+  "Manufacturing",
+  "Logistics & Transport",
+  "Retail & E-commerce",
+  "Hospitality & Travel",
+  "Automotive",
+  "Marketing & Advertising",
+  "Professional Services",
   "Wellness & Fitness",
   "Other",
 ];
 
 /**
- * Feature List §1 — Onboarding, step two.
+ * Feature List §1 — Onboarding, the business step.
  *
  * The workspace already exists by the time anyone gets here: sign-up created it. So this
  * edits it through `PATCH /workspace` rather than collecting fields for a request that

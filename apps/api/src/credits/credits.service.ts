@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
-import { CreditOperation, Prisma, type CreditTransaction } from "@prisma/client";
+import { CreditOperation, type CreditTransaction } from "@prisma/client";
 import { IntegrationEventsService } from "../integrations/integration-events.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
+import { CreditLedger, type GrantOperation } from "./credit-ledger";
 
 /**
  * Raised when a workspace cannot afford an operation.
@@ -74,6 +75,7 @@ export class CreditsService {
     private readonly tenantPrisma: TenantPrismaFactory,
     private readonly notifications: NotificationsService,
     private readonly integrationEvents: IntegrationEventsService,
+    private readonly ledger: CreditLedger,
   ) {}
 
   private get db() {
@@ -82,7 +84,7 @@ export class CreditsService {
 
   async wallet(): Promise<WalletState> {
     const { tenantId } = this.tenantPrisma.context;
-    const wallet = await this.ensureWallet(tenantId);
+    const wallet = await this.ledger.ensureWallet(tenantId);
     return {
       balance: wallet.balance,
       lowBalanceThreshold: wallet.lowBalanceThreshold,
@@ -124,7 +126,7 @@ export class CreditsService {
       throw new BadRequestException(`No price is configured for ${request.operation}.`);
     }
 
-    await this.ensureWallet(tenantId);
+    await this.ledger.ensureWallet(tenantId);
 
     const charge = await this.prisma.$transaction(async (tx) => {
       // The lock. Everything below runs while no other transaction can read this row,
@@ -226,10 +228,11 @@ export class CreditsService {
    * not have happened.
    *
    * Also locked. A top-up racing a spend would otherwise read a stale balance and write
-   * back a total that silently discards the other transaction's effect.
+   * back a total that silently discards the other transaction's effect. The lock and the
+   * ledger row are CreditLedger's, shared with the operator console.
    */
   async grant(
-    operation: Extract<CreditOperation, "PURCHASE" | "PLAN_GRANT" | "MANUAL_ADJUSTMENT" | "REFUND">,
+    operation: GrantOperation,
     amount: number,
     options: { referenceType?: string; referenceId?: string; note?: string } = {},
   ): Promise<CreditTransaction> {
@@ -239,38 +242,13 @@ export class CreditsService {
       throw new BadRequestException("A credit amount must be positive.");
     }
 
-    await this.ensureWallet(tenantId);
-
-    return this.prisma.$transaction(async (tx) => {
-      const [locked] = await tx.$queryRaw<{ id: string; balance: number }[]>`
-        SELECT id, balance FROM credit_wallets WHERE tenant_id = ${tenantId} FOR UPDATE
-      `;
-
-      if (!locked) throw new BadRequestException("This workspace has no credit wallet.");
-
-      const balanceAfter = locked.balance + amount;
-
-      await tx.creditWallet.update({
-        where: { id: locked.id },
-        // Clearing the notification stamp on the way up so a workspace that tops up and
-        // later falls low again is warned a second time.
-        data: { balance: balanceAfter, lowBalanceNotifiedAt: null },
-      });
-
-      return tx.creditTransaction.create({
-        data: {
-          tenantId,
-          type: "CREDIT",
-          operation,
-          amount,
-          balanceBefore: locked.balance,
-          balanceAfter,
-          referenceType: options.referenceType,
-          referenceId: options.referenceId,
-          actorId: userId,
-          note: options.note,
-        },
-      });
+    return this.ledger.credit(tenantId, {
+      operation,
+      amount,
+      referenceType: options.referenceType,
+      referenceId: options.referenceId,
+      actorId: userId,
+      note: options.note,
     });
   }
 
@@ -331,7 +309,7 @@ export class CreditsService {
   async reconcile(): Promise<{ walletBalance: number; ledgerBalance: number; drift: number }> {
     const { tenantId } = this.tenantPrisma.context;
 
-    const wallet = await this.ensureWallet(tenantId);
+    const wallet = await this.ledger.ensureWallet(tenantId);
     const sums = await this.db.creditTransaction.groupBy({
       by: ["type"],
       _sum: { amount: true },
@@ -349,20 +327,5 @@ export class CreditsService {
     }
 
     return { walletBalance: wallet.balance, ledgerBalance, drift };
-  }
-
-  /**
-   * A workspace created before this service existed has no wallet row. Created lazily at
-   * zero rather than as part of tenant creation, so the ledger invariant holds from the
-   * first entry: a wallet's balance is the sum of its ledger, and an empty ledger sums
-   * to zero.
-   */
-  private async ensureWallet(tenantId: string) {
-    const existing = await this.db.creditWallet.findFirst();
-    if (existing) return existing;
-
-    return this.db.creditWallet.create({
-      data: { tenantId, balance: 0, lowBalanceThreshold: 100 } as Prisma.CreditWalletUncheckedCreateInput,
-    });
   }
 }

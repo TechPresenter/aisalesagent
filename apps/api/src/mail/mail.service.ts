@@ -1,17 +1,24 @@
 import { Injectable, Logger, type OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { reportMessage } from "../common/error-reporting";
 import { sendEmail } from "../integrations/vendors/email";
 import { keepAlive } from "../runtime/vercel";
+import type { MailKind } from "./mail-templates";
 
 export interface OutgoingMail {
+  /** What the message is, for logs. The templates in mail-templates.ts set it. */
+  kind: MailKind;
   to: string;
   subject: string;
   text: string;
   html: string;
 }
 
+/** The providers MAIL_DRIVER may name, besides `log`. */
+const PROVIDERS = new Set(["sendgrid", "resend", "brevo"]);
+
 export interface MailStatus {
-  /** "log", "sendgrid", "resend", or "none". */
+  /** "log", "sendgrid", "resend", "brevo", or "none". */
   driver: string;
   /** Whether a message handed to `send` can reach a person. */
   deliverable: boolean;
@@ -26,10 +33,14 @@ export interface MailStatus {
  * which sends that workspace's notifications — these messages are the platform's, and
  * must work before any workspace has configured anything.
  *
- * `MAIL_DRIVER` picks the transport. Outside production it defaults to `log`, which writes
- * each message to the API log so a developer can follow a reset link without a mail
- * account. In production `log` is refused: a log full of password-reset links is a log
- * full of account takeovers.
+ * `MAIL_DRIVER` picks the transport: `sendgrid`, `resend` or `brevo`, each with MAIL_API_KEY
+ * and a MAIL_FROM on a domain verified with that provider. Outside production it defaults
+ * to `log`, which writes each message to the API log so a developer can follow a reset
+ * link without a mail account. In production `log` is refused: a log full of
+ * password-reset links is a log full of account takeovers.
+ *
+ * For the same reason, every other line this service logs names a message by its kind,
+ * never by its subject, which for a verification email is the code itself.
  */
 @Injectable()
 export class MailService implements OnModuleInit {
@@ -53,7 +64,7 @@ export class MailService implements OnModuleInit {
     const driver = (this.config.get<string>("MAIL_DRIVER") ?? "").trim().toLowerCase();
     const production = this.config.get<string>("NODE_ENV") === "production";
 
-    if (driver === "sendgrid" || driver === "resend") {
+    if (PROVIDERS.has(driver)) {
       const ready = Boolean(this.config.get<string>("MAIL_API_KEY") && this.config.get<string>("MAIL_FROM"));
       return {
         driver,
@@ -90,13 +101,18 @@ export class MailService implements OnModuleInit {
     const status = this.status();
 
     if (!status.deliverable) {
-      this.logger.error(`Email "${mail.subject}" to ${maskAddress(mail.to)} not sent: ${status.reason}`);
+      this.logger.error(`Email (${mail.kind}) to ${maskAddress(mail.to)} not sent: ${status.reason}`);
+      reportMessage(`Platform email not sent: ${status.reason}`, "warning", {
+        tags: { mailKind: mail.kind, mailDriver: status.driver },
+      });
       return { ok: false, reason: `Email is not configured on this server (${status.reason}).` };
     }
 
     if (status.devLog) {
+      // The whole message, subject and code included, is the point of the log driver, and
+      // status() refuses it in production. This is the one place a subject is written out.
       this.logger.log(
-        `\n──── email (not sent: MAIL_DRIVER=log) ────\nTo: ${mail.to}\nSubject: ${mail.subject}\n\n${mail.text}\n──────────────────────────────────────────`,
+        `\n──── ${mail.kind} email (not sent: MAIL_DRIVER=log) ────\nTo: ${mail.to}\nSubject: ${mail.subject}\n\n${mail.text}\n──────────────────────────────────────────`,
       );
       return { ok: true };
     }
@@ -111,7 +127,13 @@ export class MailService implements OnModuleInit {
       mail,
     );
     if (!result.ok) {
-      this.logger.warn(`Email "${mail.subject}" to ${maskAddress(mail.to)} failed: ${result.reason}`);
+      this.logger.warn(`Email (${mail.kind}) to ${maskAddress(mail.to)} failed: ${result.reason}`);
+      // A provider refusing the platform's mail means nobody can reset a password or
+      // verify an address until someone notices, and from the log alone nobody does.
+      reportMessage("Platform email failed", "error", {
+        tags: { mailKind: mail.kind, mailDriver: status.driver },
+        extra: { reason: result.reason },
+      });
     }
     return result;
   }

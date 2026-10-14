@@ -1,7 +1,9 @@
 import { redactSecrets, vendorFetch, vendorMessage, type VendorResponse } from "./http";
 
 /**
- * Notification email through SendGrid or Resend — whichever the workspace connected.
+ * Notification email through SendGrid or Resend — whichever the workspace connected — and
+ * the platform's own email through whichever of those or Brevo MAIL_DRIVER names. Brevo
+ * is offered to the platform only: the integrations catalogue lists the first two.
  *
  * Plain transactional mail, one recipient per message: a teammate should never see who
  * else a notice went to, and one bad address must not sink the rest.
@@ -60,6 +62,26 @@ export async function sendEmail(
           subject: message.subject,
           text: message.text,
           html: message.html,
+        }),
+      });
+      break;
+
+    case "brevo":
+      vendor = "Brevo";
+      response = await vendorFetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
+        headers: {
+          // Brevo takes its key in its own header, not as a bearer token.
+          "api-key": credentials.apiKey,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          sender: { email: credentials.fromEmail, name: fromName },
+          to: [{ email: message.to }],
+          subject: message.subject,
+          textContent: message.text,
+          htmlContent: message.html,
         }),
       });
       break;

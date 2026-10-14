@@ -1,17 +1,48 @@
 import { Transform, Type } from "class-transformer";
 import {
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
+  IsISO8601,
   IsObject,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
 } from "class-validator";
 import { LeadSource, LeadStatus } from "@prisma/client";
+
+/**
+ * Why a workspace may contact a lead, as a short code stored on the lead and on the
+ * import that created it.
+ *
+ * Which grounds are acceptable for calling a business contact in India is counsel's call,
+ * not the code's, so the list is kept short and conservative and lives in one constant:
+ * narrowing it is a one-line change, and widening it should come with the wording the
+ * web app shows beside each code.
+ *
+ *   CONSENT — the person agreed to be contacted (a form, a call, an event).
+ *   EXISTING_RELATIONSHIP — an existing customer, or someone who enquired first.
+ *   LEGITIMATE_INTEREST — business contact details published for business enquiries.
+ */
+export const LAWFUL_BASES = ["CONSENT", "EXISTING_RELATIONSHIP", "LEGITIMATE_INTEREST"] as const;
+export type LawfulBasis = (typeof LAWFUL_BASES)[number];
+
+/**
+ * The most rows one import may carry. The web app splits a bigger file into batches of
+ * this size or less, so the cap bounds the work one request does — the duplicate check,
+ * the inserts and the timeline rows all run inside one transaction — rather than the size
+ * of a list a workspace can bring.
+ */
+export const MAX_IMPORT_ROWS = 10_000;
+
+/** Characters, not bytes. The body parser's byte limit on this route is the outer bound. */
+export const MAX_IMPORT_CSV_LENGTH = 4_000_000;
 
 export class CreateLeadDto {
   @IsString()
@@ -45,6 +76,20 @@ export class CreateLeadDto {
   @IsOptional()
   @IsObject()
   customFields?: Record<string, unknown>;
+
+  /** Ignored when false for a number already on the suppression list: it stays do-not-call. */
+  @IsOptional()
+  @IsBoolean()
+  doNotCall?: boolean;
+
+  @IsOptional()
+  @IsIn(LAWFUL_BASES)
+  lawfulBasis?: LawfulBasis;
+
+  /** When the person agreed to be contacted, as an ISO 8601 date or date-time. */
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  consentCapturedAt?: string;
 }
 
 /** PATCH — every field optional, and `name`/`phone` may not be blanked to empty strings. */
@@ -82,10 +127,35 @@ export class UpdateLeadDto {
   @IsOptional()
   @IsObject()
   customFields?: Record<string, unknown>;
+
+  /**
+   * Marking a lead do-not-call also puts its number on the suppression list. Clearing it
+   * takes off the workspace's own mark, and is refused (409) while the number is held for
+   * a reason that is not the lead's to give up: the person opted out on a call, an
+   * imported list said so, or a manager blocked it in Settings.
+   */
+  @IsOptional()
+  @IsBoolean()
+  doNotCall?: boolean;
+
+  /** Null clears it. */
+  @IsOptional()
+  @ValidateIf((_object, value) => value !== null)
+  @IsIn(LAWFUL_BASES)
+  lawfulBasis?: LawfulBasis | null;
+
+  /** Null clears it. */
+  @IsOptional()
+  @ValidateIf((_object, value) => value !== null)
+  @IsISO8601({ strict: true })
+  consentCapturedAt?: string | null;
 }
 
-/** Query string for `GET /leads` — search, filters and paging. */
-export class ListLeadsDto {
+/**
+ * The filters `GET /leads` and `GET /leads/export` share, so an export holds exactly the
+ * rows the list was showing — never a near miss because the two parsed a filter apart.
+ */
+export class LeadFiltersDto {
   /** Matched against name, phone and city. */
   @IsOptional()
   @IsString()
@@ -129,7 +199,10 @@ export class ListLeadsDto {
   @Min(1)
   @Max(3650)
   createdWithinDays?: number;
+}
 
+/** Query string for `GET /leads` — the shared filters plus paging. */
+export class ListLeadsDto extends LeadFiltersDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -137,6 +210,7 @@ export class ListLeadsDto {
   page?: number;
 
   // Capped so a client cannot ask for the whole table in one request and stall the pool.
+  // The whole table is what /leads/export is for, and it streams.
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -153,11 +227,16 @@ export class ListLeadsDto {
 export class ImportLeadsDto {
   @IsString()
   @MinLength(1)
+  @MaxLength(MAX_IMPORT_CSV_LENGTH, {
+    message: `The file is too large to import in one go. Split it into files of at most ${MAX_IMPORT_ROWS.toLocaleString("en-IN")} rows.`,
+  })
   csv!: string;
 
   /**
-   * {targetField: csvHeader}, e.g. {"name": "Clinic Name", "phone": "Mobile"}. Columns
-   * with no mapping are preserved into custom_fields rather than discarded.
+   * {targetField: csvHeader}, e.g. {"name": "Company", "phone": "Mobile"}. Columns with no
+   * mapping are preserved into custom_fields rather than discarded. Besides name, phone
+   * and city, `doNotCall` and `consentCapturedAt` may be mapped; a column headed "DND" or
+   * "Do not call" is picked up without being mapped.
    */
   @IsObject()
   mapping!: Record<string, string>;
@@ -168,5 +247,39 @@ export class ImportLeadsDto {
 
   /** Preview mode: run the whole pipeline and report, but write nothing. */
   @IsOptional()
+  @IsBoolean()
   dryRun?: boolean;
+
+  /**
+   * The uploader's statement that the workspace may lawfully contact everyone in the file.
+   * Required, and required to be true, for anything but a dry run.
+   */
+  @IsOptional()
+  @IsBoolean()
+  attestation?: boolean;
+
+  /** Required for anything but a dry run; recorded on the batch and on every lead it adds. */
+  @IsOptional()
+  @IsIn(LAWFUL_BASES)
+  lawfulBasis?: LawfulBasis;
+
+  /**
+   * SHA-256, in hex, of the file the uploader picked, hashed by the browser before it
+   * split the file into requests. Sent with every request of the upload and recorded on
+   * each one's ImportBatch beside the hash of the request's own CSV, which is all the
+   * server can compute itself. Optional, so a client that sends whole files need not.
+   */
+  @IsOptional()
+  @Matches(/^[0-9a-fA-F]{64}$/, { message: "fileSha256 must be a SHA-256 digest in hex." })
+  fileSha256?: string;
+
+  /**
+   * One id for the whole upload, chosen by the browser (a UUID will do) and sent with every
+   * request of it, so the batches of one file can be found together.
+   */
+  @IsOptional()
+  @Matches(/^[A-Za-z0-9_-]{8,64}$/, {
+    message: "uploadId must be 8 to 64 letters, digits, hyphens or underscores.",
+  })
+  uploadId?: string;
 }

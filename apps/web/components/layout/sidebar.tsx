@@ -5,7 +5,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Crown, Layers } from "lucide-react";
 import { navItems } from "@/config/navigation";
-import { tenantBranding } from "@/config/branding";
 import { appBrand } from "@/config/app-brand";
 import { Logo } from "@/components/brand/logo";
 import { creditsApi, type CreditWallet } from "@/lib/api-client";
@@ -18,18 +17,13 @@ import { cn, formatNumber, initialsOf } from "@/lib/utils";
  */
 export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate?: () => void }) {
   const pathname = usePathname();
-  const { user } = useSessionUser();
+  const { user, resolved } = useSessionUser();
   const [wallet, setWallet] = useState<CreditWallet | null>(null);
 
   useEffect(() => {
     if (!user) return;
     creditsApi.wallet().then(setWallet, () => setWallet(null));
   }, [user]);
-
-  // The configured branding belongs to the seeded workspace. Any other workspace — one
-  // created through sign-up, say — shows its own name rather than borrowing that one.
-  const ownBranding = !user || user.tenantName === tenantBranding.tenantName;
-  const tenantName = user?.tenantName ?? tenantBranding.tenantName;
 
   return (
     <aside
@@ -49,24 +43,7 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate?: () =
         <Logo size="sm" onDark />
       </Link>
 
-      <div className="mx-3 mb-1 flex items-center gap-2.5 rounded-lg bg-white/[0.05] px-2.5 py-2">
-        <span
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[11.5px] font-bold text-white"
-          style={{ backgroundColor: tenantBranding.primaryColor }}
-        >
-          {ownBranding ? tenantBranding.monogram : initialsOf(tenantName)}
-        </span>
-        <span className="min-w-0">
-          <span className="block truncate text-[12.5px] font-semibold leading-tight text-white">
-            {tenantName}
-          </span>
-          {ownBranding && (
-            <span className="block truncate text-[9.5px] uppercase tracking-[0.09em] text-white/45">
-              {tenantBranding.tagline}
-            </span>
-          )}
-        </span>
-      </div>
+      <WorkspaceRow resolved={resolved} tenantName={user?.tenantName} />
 
       <nav className="scrollbar-thin mt-1 flex-1 overflow-y-auto px-3 pb-4">
         <ul className="space-y-0.5">
@@ -131,5 +108,68 @@ export function Sidebar({ open, onNavigate }: { open: boolean; onNavigate?: () =
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * The signed-in workspace, under the product mark: its own name and initials on the
+ * product green.
+ *
+ * The session is read after hydration (useSessionUser), so the first frame has no
+ * workspace to show. It gets a neutral placeholder of the same size rather than a stand-in
+ * name: a default would flash some other company's identity at every customer on every
+ * page load, which is what the old demo branding here did. Once the session is read and
+ * holds no workspace name (signed out, or a session cached before names were), the row is
+ * left out rather than left loading forever. Per-workspace colours and logos arrive with
+ * the branding settings; until then every workspace wears the product green.
+ *
+ * Exported for its tests.
+ */
+export function WorkspaceRow({
+  resolved,
+  tenantName,
+}: {
+  resolved: boolean;
+  tenantName?: string;
+}) {
+  const name = tenantName?.trim();
+
+  if (!name) {
+    if (resolved) return null;
+    return (
+      <div
+        aria-busy="true"
+        className="mx-3 mb-1 flex items-center gap-2.5 rounded-lg bg-white/[0.05] px-2.5 py-2"
+      >
+        <span className="sr-only">Loading workspace</span>
+        <span aria-hidden className="h-7 w-7 shrink-0 animate-pulse rounded-md bg-white/10" />
+        <span aria-hidden className="flex h-[30px] min-w-0 flex-1 flex-col justify-center gap-2">
+          <span className="block h-2.5 w-24 animate-pulse rounded bg-white/10" />
+          <span className="block h-2 w-14 animate-pulse rounded bg-white/[0.07]" />
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-3 mb-1 flex items-center gap-2.5 rounded-lg bg-white/[0.05] px-2.5 py-2">
+      <span
+        aria-hidden
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-brand-green text-[11.5px] font-bold text-white"
+      >
+        {initialsOf(name)}
+      </span>
+      <span className="min-w-0">
+        <span
+          className="block truncate text-[12.5px] font-semibold leading-tight text-white"
+          title={name}
+        >
+          {name}
+        </span>
+        <span className="block truncate text-[9.5px] uppercase tracking-[0.09em] text-white/45">
+          Workspace
+        </span>
+      </span>
+    </div>
   );
 }

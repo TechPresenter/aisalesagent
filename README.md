@@ -52,7 +52,7 @@ password `Appsgain#2026`:
 | URL | What |
 | --- | --- |
 | http://localhost:3000 | Web dashboard |
-| http://localhost:3000/style-guide | Design system QA page |
+| http://localhost:3000/style-guide | Design system QA page (`next dev` only; 404 on production builds) |
 | http://localhost:4000/api | REST API |
 | http://localhost:4000/api/health | API liveness / readiness |
 | http://localhost:8000/docs | AI service (started separately, see below) |
@@ -129,14 +129,13 @@ docker-compose.yml   Postgres (dev + test) and Redis
 | `/verify-email` | Six-digit code, resend countdown |
 | `/forgot-password` | Request a reset link |
 | `/reset-password` | New password with a strength meter; `/success` confirms |
-| `/onboarding/role` | Role picker — owner, agent or team member |
-| `/onboarding/business` | Company name, city, industry template |
+| `/onboarding/business` | Company name and industry template |
 | `/onboarding/done` | Welcome, then into the dashboard |
 | `/` | Dashboard — KPIs, call outcomes, live calls, recent leads, AI notes |
 | `/leads` | Lead database — search, six filters, table, details panel |
 | `/leads/[id]` | Lead detail — activity timeline, AI summary, tabs |
 | `/leads/import` | CSV import — upload, column mapping, de-duplication preview |
-| `/find-leads` | AI lead discovery — prompt search, source breakdown |
+| `/find-leads` | AI lead discovery — "coming soon" unless `NEXT_PUBLIC_FEATURE_FIND_LEADS` is on, then a preview over sample data |
 | `/campaigns` | Campaign list, performance chart, lead-status donut |
 | `/ai-calling` | Live console — call status, live calls, monitor, manual dialer |
 | `/call-history` | Call log with recording, transcript and notes panel |
@@ -147,7 +146,7 @@ docker-compose.yml   Postgres (dev + test) and Redis
 | `/analytics` | Calls trend, agent performance, funnel, leads by city, insights |
 | `/plans` | Plan chooser — four tiers, monthly/yearly toggle, comparison grid |
 | `/settings` | Profile, team, billing, integrations, call settings, notifications, security, workspace |
-| `/style-guide` | Design-system QA — every `components/ui` component |
+| `/style-guide` | Design-system QA — every `components/ui` component (`next dev` only) |
 
 Every screen renders from `apps/web/lib/mock-*.ts`. Those shapes already match the
 responses the corresponding endpoints are specified to return (TRD §8), so wiring each
@@ -205,14 +204,18 @@ mapping every lead status, call status, outcome and source to a tone. Badges, do
 slices and chart series all read from it, which is what keeps green meaning "interested"
 in every place it appears. No component holds a raw hex.
 
-**Two brands, two config objects.** `config/app-brand.ts` is Appsgain, the vendor —
-the auth screens, the sidebar mark, the CTA gradient. `config/branding.ts` is the tenant
-workspace the dashboard renders itself in. They are separate so a white-labelled customer
-can change its own colours without repainting the vendor's logo, and so the pre-login
-screens have something to wear before a tenant exists. `components/brand/logo.tsx` draws
-the lockup; swapping in supplied artwork is one component, not a search across screens.
+**Two brands, kept apart.** `config/app-brand.ts` is Appsgain, the vendor — the auth
+screens, the sidebar mark, the CTA gradient, and the deploy-time vendor facts (support
+contact, the tax note under prices). The tenant is the workspace row under the sidebar
+mark. They are separate so a white-labelled customer can change its own colours without
+repainting the vendor's logo, and so the pre-login screens have something to wear before
+a tenant exists. `components/brand/logo.tsx` draws the lockup; swapping in supplied
+artwork is one component, not a search across screens.
 
-**Nothing hard-codes the tenant.** The seed workspace is a generic B2B reseller, but
-its name, monogram, tagline and colours all come from `apps/web/config/branding.ts`,
-standing in for the `branding_config` column on `Tenant` (TRD §12). Swapping that object
-rebrands the whole app — which is the white-label requirement, tested from day one.
+**Nothing hard-codes the tenant.** Every customer-facing screen names the signed-in
+workspace from the session, never the demo one: the sidebar shows the workspace's own
+name and initials on the product green, and the dashboard copy names no customer or
+vertical. `apps/web/config/branding.ts` is the shape of the `branding_config` payload
+on `Tenant` (TRD §12) with one sample, used only by the style guide's white-label
+specimen; per-workspace colours arrive when that column is read from the API.
+`apps/web/lib/brand-copy.spec.ts` keeps the demo name and third-party CDNs out.

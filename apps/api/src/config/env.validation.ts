@@ -1,3 +1,5 @@
+import { readCreditPolicy } from "../credits/credit-policy";
+
 /**
  * Fails the boot on a missing or malformed environment variable, rather than the first
  * request that happens to need it. A JWT secret that is absent in production is a
@@ -75,6 +77,10 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
       throw new Error(`${key} must look like "15m", "24h" or "7d" — got "${String(value)}"`);
     }
   }
+
+  // TRIAL_CREDITS, TRIAL_DAYS and OPERATOR_DAILY_CREDIT_CAP: optional, but a typo in one
+  // would otherwise grant the wrong number of credits to every new workspace.
+  readCreditPolicy(config);
 
   return config;
 }

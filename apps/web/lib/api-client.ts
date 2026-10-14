@@ -48,6 +48,8 @@ export interface ApiLead {
   temperature: "HOT" | "WARM" | "COLD";
   ownerId: string | null;
   customFields: Record<string, unknown> | null;
+  /** Never dialled while set, whatever a campaign says. */
+  doNotCall: boolean;
   lastContactedAt: string | null;
   convertedAt: string | null;
   createdAt: string;
@@ -66,9 +68,19 @@ export interface ImportSummary {
   imported: number;
   duplicatesInFile: { sourceRow: number; reason: string; value?: string }[];
   duplicatesInDatabase: { sourceRow: number; reason: string; value?: string }[];
+  /** Rows whose number is on the workspace's do-not-call list. */
+  suppressed?: { sourceRow: number; reason: string; value?: string }[];
   rejected: { sourceRow: number; reason: string; value?: string }[];
+  /** How many numbers the file itself marks do-not-call. */
+  doNotCall?: number;
   dryRun: boolean;
 }
+
+/**
+ * Why a workspace may contact a lead — LAWFUL_BASES in the API's lead DTO. An import
+ * commit must name one; a single lead may.
+ */
+export type LawfulBasis = "CONSENT" | "EXISTING_RELATIONSHIP" | "LEGITIMATE_INTEREST";
 
 export type LeadActivityType =
   | "CREATED" | "UPDATED" | "STATUS_CHANGED" | "SCORE_CHANGED" | "ASSIGNED"
@@ -628,7 +640,14 @@ export const leadsApi = {
     return apiFetch<ApiLead>(`/leads/${id}`);
   },
 
-  create(input: { name: string; phone: string; city?: string }): Promise<ApiLead> {
+  create(input: {
+    name: string;
+    phone: string;
+    city?: string;
+    source?: LeadSource;
+    status?: LeadStatus;
+    lawfulBasis?: LawfulBasis;
+  }): Promise<ApiLead> {
     return apiFetch<ApiLead>("/leads", { method: "POST", body: JSON.stringify(input) });
   },
 
@@ -642,6 +661,8 @@ export const leadsApi = {
       status: LeadStatus;
       score: number;
       customFields: Record<string, unknown>;
+      /** Setting it also puts the number on the do-not-call list. */
+      doNotCall: boolean;
     }>,
   ) {
     return apiFetch<ApiLead>(`/leads/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
@@ -656,11 +677,17 @@ export const leadsApi = {
     return apiFetch<void>(`/leads/${id}`, { method: "DELETE" });
   },
 
+  /**
+   * A dry run needs only the file and mapping. A commit also carries the uploader's
+   * attestation and the lawful basis it rests on, and the API refuses one without them.
+   */
   import(input: {
     csv: string;
     mapping: Record<string, string>;
     source?: LeadSource;
     dryRun?: boolean;
+    attestation?: boolean;
+    lawfulBasis?: LawfulBasis;
   }): Promise<ImportSummary> {
     return apiFetch<ImportSummary>("/leads/import", {
       method: "POST",
@@ -706,19 +733,76 @@ export interface ApiCampaign {
   targetAudience: string | null;
   aiAgentId: string | null;
   callScript: string | null;
+  aiInstructions: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  /** Null: the workspace's own cap (Settings → Call Settings). */
+  dailyCallLimit: number | null;
+  /** Minutes from midnight in `timezone`. Both null: the workspace's calling hours. */
+  callWindowStart: number | null;
+  callWindowEnd: number | null;
+  /** 0 is Sunday. Empty: the workspace's calling days. */
+  callDays: number[];
+  /** An IANA zone, or null for the workspace's calling timezone. */
+  timezone: string | null;
+  language: string;
+  maxAttempts: number;
+  retryDelayMinutes: number;
+  createdAt: string;
+  updatedAt: string;
+  stats: CampaignStats;
+}
+
+/**
+ * Everything a campaign is configured with. On a PATCH a field left out keeps its value
+ * and null clears one that may be empty. With an agent and no script, the API copies the
+ * agent's script in.
+ */
+export interface CampaignSettingsInput {
+  name: string;
+  description: string | null;
+  type: CampaignType;
+  targetAudience: string | null;
+  aiAgentId: string | null;
+  callScript: string | null;
+  aiInstructions: string | null;
+  /** "2026-11-02" or a full ISO timestamp. Must come before `endDate`. */
   startDate: string | null;
   endDate: string | null;
   dailyCallLimit: number | null;
   callWindowStart: number | null;
   callWindowEnd: number | null;
   callDays: number[];
-  timezone: string;
+  timezone: string | null;
   language: string;
   maxAttempts: number;
-  createdAt: string;
-  updatedAt: string;
-  stats: CampaignStats;
+  retryDelayMinutes: number;
 }
+
+export type CampaignLeadState =
+  "PENDING" | "QUEUED" | "IN_PROGRESS" | "COMPLETED" | "FAILED" | "SKIPPED" | "EXHAUSTED";
+
+/** One lead in a campaign, and where the dialer has got to with it. */
+export interface ApiCampaignLead {
+  leadId: string;
+  state: CampaignLeadState;
+  attempts: number;
+  lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
+  addedAt: string;
+  lead: {
+    id: string;
+    name: string;
+    contactPerson: string | null;
+    phone: string;
+    city: string | null;
+    status: LeadStatus;
+    doNotCall: boolean;
+  };
+}
+
+/** The Leads list's filters, as "add every lead matching" takes them. */
+export type CampaignLeadFilter = Omit<LeadQuery, "page" | "pageSize">;
 
 export interface CampaignOverview {
   totalCampaigns: number;
@@ -766,17 +850,11 @@ export const campaignsApi = {
     return apiFetch<ApiCampaign>(`/campaigns/${id}`);
   },
 
-  create(input: {
-    name: string;
-    description?: string;
-    type?: CampaignType;
-    aiAgentId?: string;
-    targetAudience?: string;
-  }) {
+  create(input: Pick<CampaignSettingsInput, "name"> & Partial<CampaignSettingsInput>) {
     return apiFetch<ApiCampaign>("/campaigns", { method: "POST", body: JSON.stringify(input) });
   },
 
-  update(id: string, patch: Partial<{ name: string; description: string; callScript: string }>) {
+  update(id: string, patch: Partial<CampaignSettingsInput>) {
     return apiFetch<ApiCampaign>(`/campaigns/${id}`, {
       method: "PATCH",
       body: JSON.stringify(patch),
@@ -805,6 +883,44 @@ export const campaignsApi = {
       method: "POST",
       body: JSON.stringify({ leadIds }),
     });
+  },
+
+  /**
+   * Adds every lead the filter matches, counted and chosen by the API. It refuses a filter
+   * matching more than 10,000 leads with a sentence saying how many it matched.
+   */
+  addMatchingLeads(
+    id: string,
+    filter: CampaignLeadFilter,
+  ): Promise<{ added: number; skipped: number }> {
+    return apiFetch<{ added: number; skipped: number }>(`/campaigns/${id}/leads`, {
+      method: "POST",
+      body: JSON.stringify({ ...filter, allMatchingFilter: true }),
+    });
+  },
+
+  /** The campaign's leads, most recently added first. */
+  leads(
+    id: string,
+    query: { search?: string; state?: CampaignLeadState[]; page?: number; pageSize?: number } = {},
+  ) {
+    const params = new URLSearchParams();
+    if (query.search) params.set("search", query.search);
+    if (query.state?.length) params.set("state", query.state.join(","));
+    if (query.page) params.set("page", String(query.page));
+    if (query.pageSize) params.set("pageSize", String(query.pageSize));
+    const qs = params.toString();
+    return apiFetch<{
+      data: ApiCampaignLead[];
+      page: number;
+      pageSize: number;
+      total: number;
+      totalPages: number;
+    }>(`/campaigns/${id}/leads${qs ? `?${qs}` : ""}`);
+  },
+
+  removeLead(id: string, leadId: string): Promise<void> {
+    return apiFetch<void>(`/campaigns/${id}/leads/${leadId}`, { method: "DELETE" });
   },
 };
 

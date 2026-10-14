@@ -6,6 +6,7 @@ export const IS_PUBLIC_KEY = "auth:isPublic";
 export const REQUIRED_ROLE_KEY = "auth:requiredRole";
 export const ALLOW_CROSS_TENANT_KEY = "auth:allowCrossTenant";
 export const REQUIRED_PERMISSIONS_KEY = "auth:requiredPermissions";
+export const ALLOW_WHEN_SUSPENDED_KEY = "auth:allowWhenSuspended";
 
 /**
  * Opens a route to unauthenticated callers. Authentication is on by default — the guards
@@ -35,6 +36,17 @@ export const RequirePermissions = (...permissions: Permission[]) =>
  * tenantId in the request that differs from the token's.
  */
 export const AllowCrossTenant = () => SetMetadata(ALLOW_CROSS_TENANT_KEY, true);
+
+/**
+ * Lets a suspended workspace, or one whose trial has ended, still make this change.
+ *
+ * Suspension is read-only by default: TenantGuard refuses every request that is not a
+ * read. The exceptions are the ones a workspace needs in order to get back in good
+ * standing or to keep its own accounts safe — billing, and a person's own password,
+ * sessions and two-factor settings — and they are marked with this rather than listed in
+ * the guard, so the exemption sits on the route it applies to.
+ */
+export const AllowWhenSuspended = () => SetMetadata(ALLOW_WHEN_SUSPENDED_KEY, true);
 
 /** The authenticated caller, as resolved from the access token. */
 export const CurrentUser = createParamDecorator(

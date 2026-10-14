@@ -5,14 +5,28 @@ import {
   Logger,
   NotFoundException,
 } from "@nestjs/common";
-import { CampaignStatus, Prisma, type Campaign } from "@prisma/client";
+import {
+  CampaignStatus,
+  Prisma,
+  type AiAgent,
+  type Campaign,
+  type CampaignLeadState,
+  type LeadStatus,
+} from "@prisma/client";
+import { normalisePhone } from "../leads/leads.dedupe";
+import { leadWhere } from "../leads/leads.service";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
 import { scopedCreate } from "../prisma/tenant-scoped";
-import type {
-  AddCampaignLeadsDto,
-  CreateCampaignDto,
-  ListCampaignsDto,
-  UpdateCampaignDto,
+import { scriptFromAgent } from "./campaign-script";
+import {
+  CALL_WINDOW_ORDER_MESSAGE,
+  DATE_ORDER_MESSAGE,
+  MAX_LEADS_PER_ADD,
+  type AddCampaignLeadsDto,
+  type CreateCampaignDto,
+  type ListCampaignLeadsDto,
+  type ListCampaignsDto,
+  type UpdateCampaignDto,
 } from "./dto/campaign.dto";
 
 /** The performance figures the list and detail views show, counted per campaign. */
@@ -50,6 +64,41 @@ export interface PaginatedCampaigns {
   pageSize: number;
   total: number;
   totalPages: number;
+}
+
+/** One lead in a campaign, with where the dialer has got to with it. */
+export interface CampaignLeadRow {
+  leadId: string;
+  state: CampaignLeadState;
+  attempts: number;
+  lastAttemptAt: Date | null;
+  nextAttemptAt: Date | null;
+  addedAt: Date;
+  lead: {
+    id: string;
+    name: string;
+    contactPerson: string | null;
+    phone: string;
+    city: string | null;
+    status: LeadStatus;
+    doNotCall: boolean;
+  };
+}
+
+export interface PaginatedCampaignLeads {
+  data: CampaignLeadRow[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+/** The schedule fields that are judged together, as they will be stored. */
+interface Schedule {
+  callWindowStart: number | null;
+  callWindowEnd: number | null;
+  startDate: Date | null;
+  endDate: Date | null;
 }
 
 const DEFAULT_PAGE_SIZE = 25;
@@ -192,8 +241,15 @@ export class CampaignsService {
   }
 
   async create(dto: CreateCampaignDto): Promise<CampaignWithStats> {
-    this.assertCallWindow(dto);
-    await this.assertAgentExists(dto.aiAgentId);
+    const startDate = toDate(dto.startDate) ?? null;
+    const endDate = toDate(dto.endDate) ?? null;
+    this.assertSchedule({
+      callWindowStart: dto.callWindowStart ?? null,
+      callWindowEnd: dto.callWindowEnd ?? null,
+      startDate,
+      endDate,
+    });
+    const agent = await this.agentFor(dto.aiAgentId);
 
     const campaign = await this.uniqueName(dto.name, () =>
       this.db.campaign.create({
@@ -206,15 +262,19 @@ export class CampaignsService {
           status: "DRAFT",
           targetAudience: dto.targetAudience,
           aiAgentId: dto.aiAgentId,
-          callScript: dto.callScript,
+          callScript: dto.callScript?.trim()
+            ? dto.callScript
+            : ((agent && scriptFromAgent(agent)) ?? dto.callScript),
           aiInstructions: dto.aiInstructions,
-          startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-          endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+          startDate,
+          endDate,
           dailyCallLimit: dto.dailyCallLimit,
           callWindowStart: dto.callWindowStart,
           callWindowEnd: dto.callWindowEnd,
           callDays: dto.callDays,
-          timezone: dto.timezone,
+          // Empty unless someone picked a zone: the gate then reads the workspace's calling
+          // timezone at dial time, so a campaign follows the workspace if that changes.
+          timezone: dto.timezone ?? null,
           language: dto.language,
           maxAttempts: dto.maxAttempts,
           retryDelayMinutes: dto.retryDelayMinutes,
@@ -226,33 +286,65 @@ export class CampaignsService {
     return withStats;
   }
 
+  /**
+   * PATCH. A field left out keeps its value; null clears one that may be empty (see
+   * UpdateCampaignDto). The schedule is judged as it will be stored — this request's
+   * values over the saved ones — because a request that moves only the start of the
+   * window can still put it after the end.
+   */
   async update(id: string, dto: UpdateCampaignDto): Promise<CampaignWithStats> {
-    this.assertCallWindow(dto);
-    await this.assertAgentExists(dto.aiAgentId);
+    const current = await this.db.campaign.findUnique({ where: { id } });
+    if (!current) throw new NotFoundException("Campaign not found");
+
+    const startDate = toDate(dto.startDate);
+    const endDate = toDate(dto.endDate);
+    this.assertSchedule({
+      callWindowStart:
+        dto.callWindowStart === undefined ? current.callWindowStart : dto.callWindowStart,
+      callWindowEnd: dto.callWindowEnd === undefined ? current.callWindowEnd : dto.callWindowEnd,
+      startDate: startDate === undefined ? current.startDate : startDate,
+      endDate: endDate === undefined ? current.endDate : endDate,
+    });
+
+    const named = await this.agentFor(dto.aiAgentId);
+    const agentId = dto.aiAgentId === undefined ? current.aiAgentId : dto.aiAgentId;
+    const script = dto.callScript === undefined ? current.callScript : dto.callScript;
+
+    // Same rule as create: an agent and no script means the agent's script. It applies to
+    // any save, so a campaign made before this rule existed is fixed the first time
+    // someone touches it.
+    let callScript = dto.callScript;
+    if (agentId && !script?.trim()) {
+      const agent = named ?? (await this.db.aiAgent.findUnique({ where: { id: agentId } }));
+      const fromAgent = agent && scriptFromAgent(agent);
+      if (fromAgent) callScript = fromAgent;
+    }
 
     await this.uniqueName(
-      dto.name,
+      dto.name ?? undefined,
       () =>
         this.db.campaign.update({
           where: { id },
           data: {
-            name: dto.name,
+            // `?? undefined` on the columns that cannot be empty: a null there means
+            // nothing, and is ignored rather than passed on to fail as a database error.
+            name: dto.name ?? undefined,
             description: dto.description,
-            type: dto.type,
+            type: dto.type ?? undefined,
             targetAudience: dto.targetAudience,
             aiAgentId: dto.aiAgentId,
-            callScript: dto.callScript,
+            callScript,
             aiInstructions: dto.aiInstructions,
-            startDate: dto.startDate ? new Date(dto.startDate) : undefined,
-            endDate: dto.endDate ? new Date(dto.endDate) : undefined,
+            startDate,
+            endDate,
             dailyCallLimit: dto.dailyCallLimit,
             callWindowStart: dto.callWindowStart,
             callWindowEnd: dto.callWindowEnd,
-            callDays: dto.callDays,
+            callDays: dto.callDays ?? undefined,
             timezone: dto.timezone,
-            language: dto.language,
-            maxAttempts: dto.maxAttempts,
-            retryDelayMinutes: dto.retryDelayMinutes,
+            language: dto.language ?? undefined,
+            maxAttempts: dto.maxAttempts ?? undefined,
+            retryDelayMinutes: dto.retryDelayMinutes ?? undefined,
           },
         }),
       id,
@@ -326,16 +418,31 @@ export class CampaignsService {
       throw new BadRequestException("Leads cannot be added to a finished campaign.");
     }
 
-    const where: Prisma.LeadWhereInput = { doNotCall: false };
+    let matching: Prisma.LeadWhereInput;
+    let requested: number;
     if (dto.leadIds?.length) {
-      where.id = { in: dto.leadIds };
+      matching = { id: { in: dto.leadIds } };
+      requested = dto.leadIds.length;
     } else if (dto.allMatchingFilter) {
-      if (dto.status?.length) where.status = { in: dto.status as never };
+      matching = leadWhere(dto);
+      requested = await this.db.lead.count({ where: matching });
+      // Refused rather than quietly cut at the cap: "added 10,000" from a filter that
+      // matched 40,000 reads as "added them all" to anyone not doing the arithmetic.
+      if (requested > MAX_LEADS_PER_ADD) {
+        throw new BadRequestException(
+          `That filter matches ${requested.toLocaleString("en-IN")} leads. At most ` +
+            `${MAX_LEADS_PER_ADD.toLocaleString("en-IN")} can be added at once, so narrow ` +
+            "the filter and add them in parts.",
+        );
+      }
     } else {
       throw new BadRequestException("Provide leadIds, or set allMatchingFilter.");
     }
 
-    const eligible = await this.db.lead.findMany({ where, select: { id: true } });
+    const eligible = await this.db.lead.findMany({
+      where: { AND: [matching, { doNotCall: false }] },
+      select: { id: true },
+    });
 
     const result = await this.db.campaignLead.createMany({
       data: eligible.map((lead) =>
@@ -348,8 +455,70 @@ export class CampaignsService {
       skipDuplicates: true,
     });
 
-    const requested = dto.leadIds?.length ?? eligible.length;
+    // Skipped: already in the campaign, marked do-not-call, or (for an id list) not a
+    // lead in this workspace.
     return { added: result.count, skipped: requested - result.count };
+  }
+
+  /** The campaign's leads, most recently added first, for the campaign page. */
+  async listLeads(id: string, query: ListCampaignLeadsDto): Promise<PaginatedCampaignLeads> {
+    const campaign = await this.db.campaign.findUnique({ where: { id }, select: { id: true } });
+    if (!campaign) throw new NotFoundException("Campaign not found");
+
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? DEFAULT_PAGE_SIZE;
+
+    const where: Prisma.CampaignLeadWhereInput = { campaignId: id };
+    if (query.state?.length) where.state = { in: query.state };
+    const term = query.search?.trim();
+    if (term) {
+      // Matched the way the Leads list matches (leadWhere): the phone by the normalised
+      // form of what was typed, since that is how phones are stored.
+      where.lead = {
+        OR: [
+          { name: { contains: term, mode: "insensitive" } },
+          { city: { contains: term, mode: "insensitive" } },
+          { phone: { contains: normalisePhone(term).value ?? term } },
+        ],
+      };
+    }
+
+    // Sequential, for the same reason as overview(): the dev database serves one query at
+    // a time.
+    const rows = await this.db.campaignLead.findMany({
+      where,
+      orderBy: [{ addedAt: "desc" }, { leadId: "asc" }],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      select: {
+        leadId: true,
+        state: true,
+        attempts: true,
+        lastAttemptAt: true,
+        nextAttemptAt: true,
+        addedAt: true,
+        lead: {
+          select: {
+            id: true,
+            name: true,
+            contactPerson: true,
+            phone: true,
+            city: true,
+            status: true,
+            doNotCall: true,
+          },
+        },
+      },
+    });
+    const total = await this.db.campaignLead.count({ where });
+
+    return {
+      data: rows,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    };
   }
 
   async removeLead(id: string, leadId: string): Promise<void> {
@@ -539,26 +708,38 @@ export class CampaignsService {
     }
   }
 
-  /** A call window that ends before it starts would silently never fire. */
-  private assertCallWindow(dto: { callWindowStart?: number; callWindowEnd?: number }): void {
-    if (
-      dto.callWindowStart !== undefined &&
-      dto.callWindowEnd !== undefined &&
-      dto.callWindowEnd <= dto.callWindowStart
-    ) {
-      throw new BadRequestException("The calling window must end after it starts.");
+  /**
+   * The schedule as it will be stored. A call window that ends before it starts would
+   * silently never fire, and half a window would be completed at dial time by the
+   * workspace's other half, which can land on either side of it. The DTO checks a request
+   * that carries both ends; this also catches a PATCH that moves only one of them.
+   */
+  private assertSchedule(schedule: Schedule): void {
+    const { callWindowStart: start, callWindowEnd: end } = schedule;
+    if ((start === null) !== (end === null)) {
+      throw new BadRequestException(
+        "Set both ends of the calling window, or neither to use the workspace's hours.",
+      );
+    }
+    if (start !== null && end !== null && end <= start) {
+      throw new BadRequestException(CALL_WINDOW_ORDER_MESSAGE);
+    }
+    if (schedule.startDate && schedule.endDate && schedule.endDate <= schedule.startDate) {
+      throw new BadRequestException(DATE_ORDER_MESSAGE);
     }
   }
 
   /**
-   * Checked explicitly rather than left to the foreign key: the scoped client would
-   * reject another tenant's agent id with a constraint error, and "Foreign key violation"
-   * is not something to show a salesperson.
+   * The agent a request names, read through the scoped client. Checked explicitly rather
+   * than left to the foreign key: the scoped client would reject another tenant's agent id
+   * with a constraint error, and "Foreign key violation" is not something to show a
+   * salesperson.
    */
-  private async assertAgentExists(aiAgentId?: string): Promise<void> {
-    if (!aiAgentId) return;
+  private async agentFor(aiAgentId?: string | null): Promise<AiAgent | null> {
+    if (!aiAgentId) return null;
     const agent = await this.db.aiAgent.findUnique({ where: { id: aiAgentId } });
     if (!agent) throw new BadRequestException("That AI agent does not exist in this workspace.");
+    return agent;
   }
 
   /** "Q3 Outbound" -> "Q3 Outbound (copy)" -> "Q3 Outbound (copy 2)". */
@@ -575,4 +756,10 @@ export class CampaignsService {
     }
     return `${base} (copy ${Date.now()})`;
   }
+}
+
+/** A date from a request: undefined stays undefined (unchanged), null stays null (cleared). */
+function toDate(value: string | null | undefined): Date | null | undefined {
+  if (value === undefined || value === null) return value;
+  return new Date(value);
 }

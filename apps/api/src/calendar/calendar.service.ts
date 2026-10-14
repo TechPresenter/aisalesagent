@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { CalendarEventType, Prisma, type CalendarEvent } from "@prisma/client";
+import { assertInTenant } from "../common/assert-in-tenant";
 import { IntegrationEventsService } from "../integrations/integration-events.service";
 import { TenantPrismaFactory } from "../prisma/tenant-prisma.provider";
 import { scopedCreate } from "../prisma/tenant-scoped";
@@ -133,10 +134,12 @@ export class CalendarService {
     const { tenantId, userId } = this.tenantPrisma.context;
     const { startAt, endAt } = this.window(input.startAt, input.endAt);
 
-    if (input.leadId) {
-      const lead = await this.db.lead.findUnique({ where: { id: input.leadId } });
-      if (!lead) throw new NotFoundException("That lead does not exist in this workspace.");
-    }
+    // Each id in the body must name a row in this workspace. The foreign keys would accept
+    // another workspace's member or campaign, and the event's include would then show
+    // their name on this tenant's calendar.
+    await assertInTenant(this.db.user, input.ownerId, "team member");
+    await assertInTenant(this.db.lead, input.leadId, "lead");
+    await assertInTenant(this.db.campaign, input.campaignId, "campaign");
 
     const event = await this.db.calendarEvent.create({
       data: scopedCreate<Prisma.CalendarEventUncheckedCreateInput>({
@@ -181,6 +184,8 @@ export class CalendarService {
   ): Promise<CalendarEvent> {
     const existing = await this.db.calendarEvent.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException("Event not found");
+    // Null clears the owner and needs no check; an id must be one of this workspace's.
+    await assertInTenant(this.db.user, input.ownerId, "team member");
 
     const data: Prisma.CalendarEventUncheckedUpdateInput = {};
     if (input.title !== undefined) data.title = input.title.trim();

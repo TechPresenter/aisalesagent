@@ -17,6 +17,7 @@ import {
   type CampaignStatus,
 } from "@/lib/api-client";
 import { CAMPAIGN_STATUS, CAMPAIGN_TYPE, availableActions } from "@/lib/campaign-display";
+import { campaignReadiness } from "@/lib/campaign-setup";
 import { TONE_HEX } from "@/lib/status";
 import { cn, formatDate, formatNumber } from "@/lib/utils";
 
@@ -41,7 +42,9 @@ const TABS: { label: string; statuses?: CampaignStatus[] }[] = [
  *
  * Lifecycle buttons call the API and refetch. The server decides whether a transition is
  * legal and refuses with a sentence; this component shows that sentence rather than
- * keeping its own copy of the rules.
+ * keeping its own copy of the rules. The one exception is a campaign that plainly cannot
+ * start yet — no agent, no script or no leads — whose Activate button is a "Set up" link
+ * to its page instead, since that page is where those are added.
  */
 export function CampaignsView({ refreshKey = 0 }: { refreshKey?: number }) {
   const [tab, setTab] = useState(0);
@@ -247,27 +250,38 @@ export function CampaignsView({ refreshKey = 0 }: { refreshKey?: number }) {
                             />
                           ) : (
                             <>
-                              {availableActions(campaign.status).map((entry) => (
-                                <button
-                                  key={entry.action}
-                                  type="button"
-                                  onClick={() =>
-                                    void run(
-                                      campaign.id,
-                                      () => campaignsApi.transition(campaign.id, entry.action),
-                                      `${campaign.name} — ${entry.label.toLowerCase()}d.`,
-                                    )
-                                  }
-                                  className={cn(
-                                    "rounded-md px-2 py-1 text-[12px] font-semibold transition-colors",
-                                    entry.tone === "primary"
-                                      ? "bg-accent-blue text-white hover:bg-[#1B6CD8]"
-                                      : "border border-slate-200 text-brand-navy hover:bg-slate-50",
-                                  )}
-                                >
-                                  {entry.label}
-                                </button>
-                              ))}
+                              {availableActions(campaign.status).map((entry) =>
+                                entry.action === "activate" &&
+                                !campaignReadiness(campaign).every((item) => item.done) ? (
+                                  <Link
+                                    key={entry.action}
+                                    href={`/campaigns/${campaign.id}`}
+                                    className="rounded-md bg-accent-blue px-2 py-1 text-[12px] font-semibold text-white transition-colors hover:bg-[#1B6CD8]"
+                                  >
+                                    Set up
+                                  </Link>
+                                ) : (
+                                  <button
+                                    key={entry.action}
+                                    type="button"
+                                    onClick={() =>
+                                      void run(
+                                        campaign.id,
+                                        () => campaignsApi.transition(campaign.id, entry.action),
+                                        `${campaign.name} — ${entry.label.toLowerCase()}d.`,
+                                      )
+                                    }
+                                    className={cn(
+                                      "rounded-md px-2 py-1 text-[12px] font-semibold transition-colors",
+                                      entry.tone === "primary"
+                                        ? "bg-accent-blue text-white hover:bg-[#1B6CD8]"
+                                        : "border border-slate-200 text-brand-navy hover:bg-slate-50",
+                                    )}
+                                  >
+                                    {entry.label}
+                                  </button>
+                                ),
+                              )}
                               <IconAction
                                 label={`Duplicate ${campaign.name}`}
                                 icon={Copy}

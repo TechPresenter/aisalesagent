@@ -182,16 +182,19 @@ that change per environment:
 | `API_PUBLIC_URL` | API | https://api-dev.appsgain.app | https://api-qa… | https://api-uat… | https://api.appsgain.app |
 | `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`, `CRON_SECRET` | API | unique | unique | unique | unique |
 | `MAIL_DRIVER`, `MAIL_API_KEY`, `MAIL_FROM` | API | test sender | test sender | real sender | real sender |
+| `SENTRY_DSN`, `SENTRY_ENVIRONMENT` | API | DSN, `dev` | DSN, `qa` | DSN, `uat` | DSN, `live` |
+| `TRIAL_CREDITS`, `TRIAL_DAYS`, `OPERATOR_DAILY_CREDIT_CAP` | API | e.g. `100`, `0`, default | as DEV | as LIVE | the owner's decision; unset = `0` free credits, a trial that never ends, and a cap of `10000` a day |
 | `NEXT_PUBLIC_API_URL` | Web | https://api-dev.appsgain.app | https://api-qa… | https://api-uat… | https://api.appsgain.app |
 | `ACCESS_GATE_USERNAME`, `ACCESS_GATE_PASSWORD` | Web | set | set | set | **not set** |
+| `NEXT_PUBLIC_FEATURE_FIND_LEADS` | Web | `true` to review the sample-data preview, or not set | not set | not set | **not set** until discovery has a licensed data source |
 | `CLERK_SECRET_KEY` (API), `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (Web) | both | Clerk development instance | development | development | production instance once there is a domain; until then **not set** is recommended (see "A development instance until there is a domain") |
 
 Generate secrets with `openssl rand -base64 48`.
 
 If a required setting is missing or weak, the API **build fails** with a message naming it.
 This covers the database URL, the JWT secrets, `CREDENTIALS_ENCRYPTION_KEY`,
-`API_CORS_ORIGINS` and `WEB_APP_URL`. An environment is never left broken behind a
-successful deployment.
+`API_CORS_ORIGINS` and `WEB_APP_URL`, and a credit setting that is not a plain whole
+number. An environment is never left broken behind a successful deployment.
 
 A changed variable takes effect only on the next deployment of that branch (use Redeploy).
 
@@ -208,6 +211,23 @@ A changed variable takes effect only on the next deployment of that branch (use 
 - **Accounts:** turn on two-factor authentication for everyone with access to Vercel, Neon
   and GitHub. Give Vercel's Production-deploy and rollback rights only to people who may
   release.
+- **The platform operator** (SUPER_ADMIN) is the only account that can list workspaces,
+  suspend, reactivate or close one, and grant credits (`/api/admin`). No workspace can add
+  credits to itself. There is no sign-up for it: create it once per environment from a
+  machine that has that environment's direct database URL, then sign in with workspace
+  `appsgain` and turn on two-factor authentication straight away.
+
+  ```bash
+  cd apps/api
+  DATABASE_URL="<DATABASE_URL_UNPOOLED of that environment>" \
+    npx ts-node scripts/create-super-admin.ts --email ops@your-domain --name "Platform Ops"
+  ```
+
+  It asks for the password without echoing it (or reads `SUPER_ADMIN_PASSWORD`).
+  `--reset-password` sets a new one and signs the operator out everywhere. The script marks
+  the operator's email as confirmed, so "Continue with Google/Microsoft" with that address
+  still has to pass the operator's 2FA. Use a mailbox only the operator can read: whoever
+  can read it can sign in as the operator until 2FA is on.
 
 ## Google and Microsoft sign-in (Clerk)
 

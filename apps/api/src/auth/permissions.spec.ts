@@ -1,7 +1,9 @@
 import {
   PERMISSIONS,
+  PLATFORM_PERMISSIONS,
   ROLE_PERMISSIONS,
   ROLES,
+  WORKSPACE_PERMISSIONS,
   hasPermission,
   permissionsFor,
   type Permission,
@@ -46,17 +48,54 @@ describe("permission model", () => {
     }
   });
 
-  it("gives the owner every permission", () => {
-    const missing = PERMISSIONS.filter((p) => !ROLE_PERMISSIONS.OWNER.includes(p));
+  it("gives the owner every workspace permission", () => {
+    const missing = WORKSPACE_PERMISSIONS.filter((p) => !ROLE_PERMISSIONS.OWNER.includes(p));
     expect(missing).toEqual([]);
   });
 
-  it("leaves no permission ungranted to anyone", () => {
+  it("leaves no workspace permission ungranted to anyone", () => {
     // An orphan is either a permission nobody can ever hold — dead code guarding a route
-    // no one can reach — or a role grant somebody forgot to add.
+    // no one can reach — or a role grant somebody forgot to add. Platform permissions are
+    // the one deliberate exception, and they are listed by name below.
     const granted = new Set(WORKSPACE_ROLES.flatMap((role) => [...ROLE_PERMISSIONS[role]]));
-    const orphans = PERMISSIONS.filter((permission) => !granted.has(permission));
+    const orphans = WORKSPACE_PERMISSIONS.filter((permission) => !granted.has(permission));
     expect(orphans).toEqual([]);
+  });
+
+  describe("platform permissions", () => {
+    it("are exactly the catalogue entries no workspace role holds", () => {
+      // Pinned by name so a new platform permission is a reviewed decision, not a side
+      // effect of forgetting to grant something.
+      expect([...PLATFORM_PERMISSIONS]).toEqual(["credits.adjust"]);
+      expect([...WORKSPACE_PERMISSIONS, ...PLATFORM_PERMISSIONS].sort()).toEqual([...PERMISSIONS].sort());
+    });
+
+    it("are held by no role, the owner and the operator included", () => {
+      // The owner minting credits for their own workspace is the hole this closes. The
+      // operator does not hold it inside a workspace either: they grant through the
+      // audited /admin console, not as a member.
+      for (const role of ROLES) {
+        for (const permission of PLATFORM_PERMISSIONS) {
+          expect({ role, permission, held: hasPermission(role, permission) }).toEqual({
+            role,
+            permission,
+            held: false,
+          });
+        }
+      }
+    });
+
+    it("cannot be put into a custom role", () => {
+      expect(hasPermission("OWNER", "credits.adjust", ["credits.adjust", "credits.view"])).toBe(false);
+      expect(permissionsFor("OWNER", ["credits.adjust", "credits.view"])).toEqual(["credits.view"]);
+    });
+
+    it("leave the owner able to see and reconcile the ledger", () => {
+      expect(hasPermission("OWNER", "credits.view")).toBe(true);
+      expect(hasPermission("OWNER", "credits.manage")).toBe(true);
+      expect(hasPermission("ADMIN", "credits.view")).toBe(true);
+      expect(hasPermission("ADMIN", "credits.manage")).toBe(false);
+    });
   });
 
   it("keeps a viewer read-only", () => {
