@@ -1,15 +1,20 @@
-import { ConflictException, Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, ConflictException, Injectable, Logger } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import type { CreateWorkspaceResponse, Role, TenantSummary } from "@appsgain/shared";
 import { PrismaService } from "../prisma/prisma.service";
-import { AuthService } from "../auth/auth.service";
+import { AuthService, type SessionContext } from "../auth/auth.service";
+import { SsoService } from "../auth/sso.service";
 import { CreateWorkspaceDto, RESERVED_SUBDOMAINS } from "./dto/create-workspace.dto";
 
 @Injectable()
 export class WorkspaceService {
   private readonly logger = new Logger(WorkspaceService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly auth: AuthService,
+    private readonly sso: SsoService,
+  ) {}
 
   /**
    * TRD §8 — self-serve signup. Tenant and OWNER user are created in one transaction so
@@ -19,7 +24,10 @@ export class WorkspaceService {
    * Uses the unscoped client, which is correct here and nowhere else in feature code —
    * this is the request that brings the tenant being scoped to into existence.
    */
-  async createWorkspace(dto: CreateWorkspaceDto): Promise<CreateWorkspaceResponse> {
+  async createWorkspace(
+    dto: CreateWorkspaceDto,
+    context: SessionContext = {},
+  ): Promise<CreateWorkspaceResponse> {
     if (RESERVED_SUBDOMAINS.has(dto.subdomain)) {
       throw new ConflictException(`"${dto.subdomain}" is reserved`);
     }
@@ -27,7 +35,7 @@ export class WorkspaceService {
     // Hashing is deliberately outside the transaction: Argon2id is designed to take
     // ~100ms, and holding a database transaction open for it would pin a connection for
     // the duration under a signup burst.
-    const passwordHash = await AuthService.hashPassword(dto.ownerPassword);
+    const { passwordHash, hasPassword, emailVerifiedAt, viaSso } = await this.ownerCredentials(dto);
 
     try {
       const { tenant, owner } = await this.prisma.$transaction(async (tx) => {
@@ -56,6 +64,8 @@ export class WorkspaceService {
             name: dto.ownerName,
             email: dto.ownerEmail,
             passwordHash,
+            hasPassword,
+            emailVerifiedAt,
             // The first user is the billing owner (TRD §4), never an ADMIN — somebody
             // has to be able to reach billing or the workspace is unmanageable.
             role: "OWNER",
@@ -66,7 +76,9 @@ export class WorkspaceService {
         return { tenant, owner };
       });
 
-      this.logger.log(`Workspace created: ${tenant.subdomain} (${tenant.id})`);
+      this.logger.log(
+        `Workspace created: ${tenant.subdomain} (${tenant.id})${viaSso ? " through Google or Microsoft" : ""}`,
+      );
 
       return {
         tenant: toTenantSummary(tenant),
@@ -76,6 +88,7 @@ export class WorkspaceService {
           email: owner.email,
           role: owner.role as Role,
         },
+        ...(viaSso ? { session: await this.auth.completeSignIn(owner, tenant.name, context) } : {}),
       };
     } catch (error) {
       // P2002 is Prisma's unique-constraint violation. Catching it is not belt-and-braces
@@ -86,6 +99,50 @@ export class WorkspaceService {
       }
       throw error;
     }
+  }
+
+  /**
+   * The owner's password digest, from the password — or, for a signup through Google or
+   * Microsoft, from nothing: the signup token proved the address, so the owner gets a
+   * password nobody knows (and is marked as having none, so Settings lets them set one)
+   * and an email that is already verified. The token stands in for the password, never
+   * alongside it, and only for the address it was issued to.
+   */
+  private async ownerCredentials(dto: CreateWorkspaceDto): Promise<{
+    passwordHash: string;
+    hasPassword: boolean;
+    emailVerifiedAt: Date | null;
+    viaSso: boolean;
+  }> {
+    if (dto.ssoToken == null) {
+      if (!dto.ownerPassword) {
+        throw new BadRequestException("ownerPassword must be at least 12 characters");
+      }
+      return {
+        passwordHash: await AuthService.hashPassword(dto.ownerPassword),
+        hasPassword: true,
+        emailVerifiedAt: null,
+        viaSso: false,
+      };
+    }
+
+    const signup = await this.sso.claimSignupToken(dto.ssoToken);
+    if (dto.ownerPassword !== undefined) {
+      throw new BadRequestException(
+        "Sign up with a password or with Google or Microsoft, not both.",
+      );
+    }
+    if (dto.ownerEmail !== signup.email) {
+      throw new BadRequestException(
+        `The owner's email must be ${signup.email}, the address you continued with.`,
+      );
+    }
+    return {
+      passwordHash: await AuthService.unusablePasswordHash(),
+      hasPassword: false,
+      emailVerifiedAt: new Date(),
+      viaSso: true,
+    };
   }
 
   /**

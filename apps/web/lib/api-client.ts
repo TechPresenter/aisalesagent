@@ -1,6 +1,10 @@
 import type {
+  ClerkSignInRequest,
   CreateWorkspaceRequest,
   CreateWorkspaceResponse,
+  SsoSelectRequest,
+  SsoSignedIn,
+  SsoSignInResult,
   TenantSummary,
 } from "@appsgain/shared";
 import type { LeadSource, LeadStatus } from "./types";
@@ -315,6 +319,11 @@ function storeSession(session: SignedInSession): SignedInSession {
 
 export interface SecurityOverview {
   emailVerified: boolean;
+  /**
+   * False for an account that signed up with Google or Microsoft and has not set a
+   * password: it sets a first one (`setPassword`) instead of changing one it never had.
+   */
+  hasPassword: boolean;
   twoFactor: { enabled: boolean; enabledAt: string | null; backupCodesRemaining: number };
   /** Whether this server can send email, and whether it only writes it to the API log. */
   mail: { deliverable: boolean; devLog: boolean };
@@ -358,6 +367,31 @@ export const authApi = {
         body: JSON.stringify(input),
       }),
     );
+  },
+
+  /**
+   * "Continue with Google / Microsoft": the Clerk session token from the redirect, in
+   * exchange for what that address opens here (lib/sso-flow.ts tells the answers apart).
+   * A session is stored before it is returned, exactly as `login` stores one; a 2FA
+   * challenge, a workspace choice or a sign-up token comes back as is.
+   */
+  async signInWithClerk(input: ClerkSignInRequest): Promise<SsoSignInResult> {
+    const result = await apiFetch<SsoSignInResult>("/auth/sso/clerk", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    if (!("status" in result) && !("twoFactorRequired" in result)) storeSession(result);
+    return result;
+  },
+
+  /** The workspace picked after `signInWithClerk` answered `choose-workspace`. */
+  async selectSsoWorkspace(input: SsoSelectRequest): Promise<SsoSignedIn> {
+    const result = await apiFetch<SsoSignedIn>("/auth/sso/select", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    if (!("twoFactorRequired" in result)) storeSession(result);
+    return result;
   },
 
   mailStatus(): Promise<{ deliverable: boolean; devLog: boolean }> {
@@ -506,6 +540,18 @@ export const authApi = {
    */
   async changePassword(input: { currentPassword: string; newPassword: string }): Promise<void> {
     await apiFetch<void>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+
+  /**
+   * The first password for an account that signed up with Google or Microsoft. No current
+   * password is asked for, so the server only takes it soon after a sign-in; sessions are
+   * kept, and the caller carries on signed in.
+   */
+  async setPassword(input: { newPassword: string }): Promise<void> {
+    await apiFetch<void>("/auth/password/set", {
       method: "POST",
       body: JSON.stringify(input),
     });
@@ -1738,12 +1784,18 @@ export const workspaceApi = {
   /**
    * Self-serve signup. Public: one request creates the workspace and its OWNER together,
    * so there is never a workspace nobody can sign in to.
+   *
+   * A signup through Google or Microsoft (`ssoToken`) comes back already signed in, since
+   * its owner has no password to sign in with afterwards; that session is stored here,
+   * the same way `authApi.login` stores one.
    */
-  create(input: CreateWorkspaceRequest): Promise<CreateWorkspaceResponse> {
-    return apiFetch<CreateWorkspaceResponse>("/workspace", {
+  async create(input: CreateWorkspaceRequest): Promise<CreateWorkspaceResponse> {
+    const created = await apiFetch<CreateWorkspaceResponse>("/workspace", {
       method: "POST",
       body: JSON.stringify(input),
     });
+    if (created.session) storeSession(created.session);
+    return created;
   },
 
   /** The caller's own workspace: name, sign-in subdomain, industry, status. */

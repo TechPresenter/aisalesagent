@@ -96,6 +96,7 @@ export function Field({
   autoComplete,
   value,
   onChange,
+  readOnly = false,
 }: {
   label: string;
   icon: FieldIcon;
@@ -105,6 +106,8 @@ export function Field({
   autoComplete?: string;
   value?: string;
   onChange?: (value: string) => void;
+  /** Shown but not editable — an address a Google or Microsoft sign-in already proved. */
+  readOnly?: boolean;
 }) {
   const id = useId();
   const [revealed, setRevealed] = useState(false);
@@ -113,7 +116,12 @@ export function Field({
   const inputType = isPassword && revealed ? "text" : type;
 
   return (
-    <div className="relative rounded-btn border border-slate-200 bg-surface transition-colors focus-within:border-brand-magenta focus-within:ring-2 focus-within:ring-brand-magenta/20">
+    <div
+      className={cn(
+        "relative rounded-btn border border-slate-200 transition-colors focus-within:border-brand-magenta focus-within:ring-2 focus-within:ring-brand-magenta/20",
+        readOnly ? "bg-slate-50" : "bg-surface",
+      )}
+    >
       <Icon
         className="pointer-events-none absolute left-3.5 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-slate-400"
         strokeWidth={1.9}
@@ -133,8 +141,10 @@ export function Field({
         onChange={onChange ? (event) => onChange(event.target.value) : undefined}
         placeholder={placeholder}
         autoComplete={autoComplete}
+        readOnly={readOnly}
         className={cn(
-          "h-[58px] w-full rounded-btn bg-transparent pl-11 pt-4 text-[14px] text-brand-navy placeholder:text-slate-400 focus:outline-none",
+          "h-[58px] w-full rounded-btn bg-transparent pl-11 pt-4 text-[14px] placeholder:text-slate-400 focus:outline-none",
+          readOnly ? "text-slate-600" : "text-brand-navy",
           isPassword ? "pr-11" : "pr-3.5",
         )}
       />

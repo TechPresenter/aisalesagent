@@ -112,6 +112,8 @@ export class AccountRecoveryService {
       where: { id: user.id },
       data: {
         passwordHash: await AuthService.hashPassword(password),
+        // Also how an account that signs in with Google or Microsoft gets a password.
+        hasPassword: true,
         // Whoever reset it holds the inbox, which is the account; a pause from earlier
         // guessing should not keep them out of it.
         failedLoginCount: 0,
@@ -175,9 +177,17 @@ export class AccountRecoveryService {
     return { verified: true };
   }
 
-  async isEmailVerified(userId: string): Promise<boolean> {
-    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { emailVerifiedAt: true } });
-    return Boolean(user?.emailVerifiedAt);
+  /**
+   * For Settings → Security: whether the address is confirmed, and whether the account has
+   * a password of its own — one that signed up with Google or Microsoft has none until it
+   * sets one, and Settings offers to set it rather than asking for a current one.
+   */
+  async credentialState(userId: string): Promise<{ emailVerified: boolean; hasPassword: boolean }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { emailVerifiedAt: true, hasPassword: true },
+    });
+    return { emailVerified: Boolean(user?.emailVerifiedAt), hasPassword: user?.hasPassword ?? true };
   }
 
   private async userForResetToken(token: string) {

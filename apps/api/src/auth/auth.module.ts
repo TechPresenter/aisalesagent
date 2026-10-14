@@ -7,9 +7,11 @@ import { MailModule } from "../mail/mail.module";
 import { AccountRecoveryService } from "./account-recovery.service";
 import { ApiKeyAuthService } from "./api-key-auth.service";
 import { AuthController } from "./auth.controller";
+import { ClerkBackendVerifier, ClerkIdentityVerifier } from "./clerk-identity";
 import { InvitationAcceptService } from "./invitation-accept.service";
 import { TwoFactorService } from "./two-factor.service";
 import { AuthService } from "./auth.service";
+import { SsoService } from "./sso.service";
 import { JwtStrategy } from "./jwt.strategy";
 import { JwtAuthGuard } from "./guards/jwt-auth.guard";
 import { TenantGuard } from "./guards/tenant.guard";
@@ -37,10 +39,13 @@ import { PermissionGuard } from "./guards/permission.guard";
     TwoFactorService,
     AccountRecoveryService,
     InvitationAcceptService,
+    SsoService,
+    // Behind an abstract token so the tests can swap in a verifier that never calls Clerk.
+    { provide: ClerkIdentityVerifier, useClass: ClerkBackendVerifier },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: TenantGuard },
     { provide: APP_GUARD, useClass: PermissionGuard },
   ],
-  exports: [AuthService],
+  exports: [AuthService, SsoService],
 })
 export class AuthModule {}

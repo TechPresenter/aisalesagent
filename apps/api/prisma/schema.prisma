@@ -135,6 +135,11 @@ model User {
   name         String
   /// Argon2id digest. The plaintext password never leaves AuthService.
   passwordHash String     @map("password_hash")
+  /// False while `passwordHash` is a digest of a secret nobody was told: an owner who
+  /// signed up with Google or Microsoft, or an account whose unconfirmed password was
+  /// cleared. Such an account sets its first password without being asked for a current
+  /// one it never had. True by default, because every other way in starts with a password.
+  hasPassword  Boolean    @default(true) @map("has_password")
   role         Role       @default(AGENT)
   /// Set when the workspace has defined its own role; overrides `role` for permission
   /// checks while `role` still supplies rank for the "at least this role" guards.

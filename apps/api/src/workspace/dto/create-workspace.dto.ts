@@ -1,10 +1,12 @@
 import {
   IsEmail,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Matches,
   MaxLength,
   MinLength,
+  ValidateIf,
 } from "class-validator";
 import { Transform } from "class-transformer";
 import type { CreateWorkspaceRequest } from "@appsgain/shared";
@@ -60,8 +62,20 @@ export class CreateWorkspaceDto implements CreateWorkspaceRequest {
   @Transform(({ value }) => (typeof value === "string" ? value.trim().toLowerCase() : value))
   ownerEmail!: string;
 
+  /** Required unless the signup comes through Google or Microsoft (`ssoToken`). */
+  @ValidateIf((dto: CreateWorkspaceDto) => dto.ssoToken == null)
   @IsString()
   @MinLength(12, { message: "ownerPassword must be at least 12 characters" })
   @MaxLength(200)
-  ownerPassword!: string;
+  ownerPassword?: string;
+
+  /**
+   * The `signupToken` from `POST /auth/sso/clerk`, in place of a password. It proves the
+   * owner controls `ownerEmail`, which therefore has to be the address it was issued for.
+   */
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2048)
+  ssoToken?: string;
 }

@@ -3,17 +3,18 @@ import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 /**
  * Short-lived, single-purpose tokens that need no table.
  *
- * A password-reset link and a "now enter your 2FA code" challenge each have to carry who
- * they are for, expire on their own, and be useless for anything else. An HMAC over a small
- * JSON payload does all three: the key is derived per purpose, so a reset token cannot be
- * replayed as a sign-in challenge even though both are signed from the same secret.
+ * A password-reset link, a "now enter your 2FA code" challenge and the hand-off after a
+ * Google or Microsoft sign-in each have to carry who they are for, expire on their own,
+ * and be useless for anything else. An HMAC over a small JSON payload does all three: the
+ * key is derived per purpose, so a reset token cannot be replayed as a sign-in challenge
+ * even though both are signed from the same secret.
  *
  * Single use comes from what the claims bind to rather than from a row to delete. A reset
  * token carries a fingerprint of the password hash it was issued against; resetting the
  * password changes the hash, and every outstanding link for that account dies with it.
  */
 
-export type TokenPurpose = "password-reset" | "login-2fa";
+export type TokenPurpose = "password-reset" | "login-2fa" | "sso-signup" | "sso-select";
 
 const MAX_TOKEN_LENGTH = 2048;
 

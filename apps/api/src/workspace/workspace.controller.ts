@@ -1,6 +1,8 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post, Req } from "@nestjs/common";
+import type { Request } from "express";
 import type { CreateWorkspaceResponse, TenantSummary } from "@appsgain/shared";
 import { PrismaService } from "../prisma/prisma.service";
+import { sessionContext } from "../auth/auth.service";
 import { CurrentUser, Public, RequirePermissions } from "../auth/decorators";
 import type { TenantContext } from "../prisma/tenant-prisma.provider";
 import { CreateWorkspaceDto } from "./dto/create-workspace.dto";
@@ -18,12 +20,18 @@ export class WorkspaceController {
    * Public by necessity — this is signup, so there is no account to authenticate with
    * yet. It is also the only public write in the API, which makes it the one route that
    * will need rate limiting before this ships anywhere public.
+   *
+   * A signup through Google or Microsoft (`ssoToken`) also comes back signed in, since
+   * there is no password to sign in with afterwards.
    */
   @Public()
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(@Body() dto: CreateWorkspaceDto): Promise<CreateWorkspaceResponse> {
-    return this.workspace.createWorkspace(dto);
+  create(
+    @Body() dto: CreateWorkspaceDto,
+    @Req() request: Request,
+  ): Promise<CreateWorkspaceResponse> {
+    return this.workspace.createWorkspace(dto, sessionContext(request));
   }
 
   /**

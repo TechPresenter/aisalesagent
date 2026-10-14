@@ -1,3 +1,4 @@
+import type { LoginResponse } from "./auth";
 import type { Role } from "./roles";
 
 /** TRD §7 — Tenant.status. A suspended workspace can still log in to see billing. */
@@ -42,7 +43,14 @@ export interface CreateWorkspaceRequest {
   industryVertical?: string;
   ownerName: string;
   ownerEmail: string;
-  ownerPassword: string;
+  /** Required unless `ssoToken` is sent; never both. */
+  ownerPassword?: string;
+  /**
+   * The `signupToken` from a Google or Microsoft sign-in that found no account. Replaces
+   * the password: `ownerEmail` must be the address that sign-in proved, and the owner
+   * starts with that email already verified.
+   */
+  ssoToken?: string;
 }
 
 export interface CreateWorkspaceResponse {
@@ -53,4 +61,9 @@ export interface CreateWorkspaceResponse {
     email: string;
     role: Role;
   };
+  /**
+   * Present only for a signup with `ssoToken`: the owner, signed in. A password signup
+   * signs in with `POST /auth/login` as before; an SSO signup has no password to do that with.
+   */
+  session?: LoginResponse;
 }

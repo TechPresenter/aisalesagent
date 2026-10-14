@@ -1,5 +1,5 @@
 import { INestApplication, ValidationPipe } from "@nestjs/common";
-import { Test } from "@nestjs/testing";
+import { Test, type TestingModuleBuilder } from "@nestjs/testing";
 import request from "supertest";
 import { AppModule } from "../src/app.module";
 import { PrismaService } from "../src/prisma/prisma.service";
@@ -15,12 +15,17 @@ export interface TestWorkspace {
 
 export const TEST_PASSWORD = "correct-horse-battery-staple";
 
-/** Boots the real application — same modules, same global guards, same pipes. */
-export async function createTestApp(): Promise<{
+/**
+ * Boots the real application — same modules, same global guards, same pipes. `override`
+ * swaps a provider that would otherwise leave the machine, such as the Clerk verifier.
+ */
+export async function createTestApp(
+  override: (builder: TestingModuleBuilder) => TestingModuleBuilder = (builder) => builder,
+): Promise<{
   app: INestApplication;
   prisma: PrismaService;
 }> {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const moduleRef = await override(Test.createTestingModule({ imports: [AppModule] })).compile();
 
   const app = moduleRef.createNestApplication();
   app.setGlobalPrefix("api");

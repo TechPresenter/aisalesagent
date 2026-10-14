@@ -184,6 +184,7 @@ that change per environment:
 | `MAIL_DRIVER`, `MAIL_API_KEY`, `MAIL_FROM` | API | test sender | test sender | real sender | real sender |
 | `NEXT_PUBLIC_API_URL` | Web | https://api-dev.appsgain.app | https://api-qa… | https://api-uat… | https://api.appsgain.app |
 | `ACCESS_GATE_USERNAME`, `ACCESS_GATE_PASSWORD` | Web | set | set | set | **not set** |
+| `CLERK_SECRET_KEY` (API), `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (Web) | both | Clerk development instance | development | development | production instance once there is a domain; until then **not set** is recommended (see "A development instance until there is a domain") |
 
 Generate secrets with `openssl rand -base64 48`.
 
@@ -207,6 +208,143 @@ A changed variable takes effect only on the next deployment of that branch (use 
 - **Accounts:** turn on two-factor authentication for everyone with access to Vercel, Neon
   and GitHub. Give Vercel's Production-deploy and rollback rights only to people who may
   release.
+
+## Google and Microsoft sign-in (Clerk)
+
+"Continue with Google" and "Continue with Microsoft" on the sign-in and sign-up pages go
+through [Clerk](https://clerk.com). Clerk only confirms that the person controls a verified
+email address. Accounts, workspaces, roles, two-factor authentication and sessions stay
+Appsgain's own. The API revokes each Clerk session as it reads it, and the browser signs
+out of Clerk as well, so no Clerk session outlives the sign-in. Email and password sign-in
+is unchanged.
+
+**How a sign-in goes.**
+1. The button notes in the tab that a sign-in has started, and sends the browser through
+   Clerk to Google or Microsoft.
+2. Clerk returns to `/sign-in/sso-complete`. Someone Clerk has not seen before passes through
+   `/sign-in/sso-callback` first, where Clerk creates its record of them. Both pages carry on
+   only in a tab that started a sign-in; opened any other way, they end whatever Clerk session
+   the browser has and go back to the sign-in page.
+3. That page sends Clerk's short-lived token, and the workspace typed on the sign-in form, to
+   `POST /api/auth/sso/clerk`. The API checks it, takes the Google or Microsoft account's
+   primary email (only if it is verified) and answers:
+   - one account with that email: signed in, or the usual 2FA code step if the account has 2FA
+   - accounts in several workspaces: a list to pick from
+   - no account: the sign-up form, with name and email filled in and no password to choose.
+     It also says when the address belongs to an account that was turned off, or has an
+     invitation waiting.
+4. An account whose email was never confirmed is never opened straight away: anyone can sign
+   up with someone else's address and wait. The page shows the workspace with its other
+   members, pending invitations, API keys and webhooks, and offers to create a new workspace
+   instead. Opening it replaces its password, removes its 2FA and ends its other sessions,
+   and the page then says what to look over under Settings → Team and Integrations.
+
+**Accounts without a password.** An owner who signed up with Google or Microsoft has no
+password. They can set one under Settings → Security within 30 minutes of signing in, with
+no email needed; after that they sign in again first. "Forgot password" works too, once
+`MAIL_*` is configured. Two-factor authentication needs a password, so Settings asks for one
+first.
+
+### Setting it up
+
+1. Create an application at [dashboard.clerk.com](https://dashboard.clerk.com).
+   - Sign-in and sign-up with **email address** only; leave phone number off.
+   - Leave **username** and **consent to legal documents** off too. The pages here have no
+     screen to ask for them, so a first Google or Microsoft sign-in would stop half-way.
+     (Appsgain's own sign-up form asks for the terms.)
+   - Under **SSO connections**, turn on **Google** and **Microsoft**.
+   - Clerk's bot protection can stay on. When it challenges a first-time visitor, the
+     challenge appears over `/sign-in/sso-callback`.
+   - On a **development instance**, turn **Test mode** off (instance settings in the Clerk
+     dashboard). Test mode treats any address with `+clerk_test` in it as verified without
+     sending an email. The API refuses those addresses anyway.
+2. Copy the **Publishable key** and the **Secret key** from the **API keys** page into the
+   Vercel projects:
+
+   | Variable | Project | Value |
+   | --- | --- | --- |
+   | `CLERK_SECRET_KEY` | API | Secret key: `sk_test_…` (development), `sk_live_…` (production) |
+   | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Web | Publishable key: `pk_test_…` or `pk_live_…` |
+   | `CLERK_JWT_KEY` (optional) | API | The **PEM public key** from the same page. The API then checks tokens without calling Clerk. |
+
+   - Both keys must come from the same Clerk instance.
+   - The publishable key is built into the pages, so redeploy the web project after changing it.
+3. **The web app's exact address must be in the API's `API_CORS_ORIGINS`** (or be its
+   `WEB_APP_URL`). The API refuses Clerk tokens obtained on any other origin, so a Vercel
+   preview URL that is not listed gets "could not be confirmed".
+4. Locally, the secret key goes in `.env` and the publishable key in `apps/web/.env.local`.
+   `http://localhost:3000` and `http://localhost:3001` are already allowed origins.
+
+Without the keys, the two buttons stay disabled and `/api/auth/sso/*` answers 503 with a
+message pointing to email sign-in. Deploying the code before the keys exist is safe.
+
+### A development instance until there is a domain
+
+A Clerk production instance needs a domain you control, because Clerk serves part of the
+sign-in from a subdomain of it (DNS records on the Clerk **Domains** page). A
+`*.vercel.app` address cannot be used for that. Until the domain is bought, every
+environment, LIVE included, uses the **development instance** (`pk_test_`, `sk_test_`).
+
+- It works end to end, and nothing in the code depends on which kind of instance it is.
+- Google and Microsoft use Clerk's shared OAuth credentials, so their consent screens do not
+  show Appsgain's name.
+- **A development instance holds at most 100 users.** Everyone who has ever used either
+  button counts, although Appsgain ends their Clerk session straight away. After that, a
+  newcomer's Google or Microsoft sign-in fails at Clerk (email and password still work).
+  Appsgain does not need the users Clerk keeps, so deleting old ones on the Clerk **Users**
+  page makes room.
+- It breaks the rule that test keys never work on LIVE. Move LIVE to a production instance as
+  soon as there is a domain. Users cannot be moved between Clerk instances, which does not
+  matter here: Appsgain's accounts are its own.
+
+**The security risk, and the recommendation.** A development instance keeps the browser's
+Clerk client in a value (`__clerk_db_jwt`) that it accepts from the address bar. Clerk says
+this is not secure enough for production. Without protection, anyone who got a person to
+open a crafted `/sign-in` link would share that person's Clerk client. They could then read
+the token of that person's next Google or Microsoft sign-in and use it to take over the
+Appsgain account (any account without 2FA, and new sign-ups too). Or they could sign the
+person in to an account the attacker controls.
+
+The code now defends against this:
+- Every page that loads Clerk removes the value from the address before Clerk reads it. The
+  only exception is a return page in a tab that has just started a sign-in.
+- The return pages only carry on in a tab that started a sign-in.
+- The API revokes each Clerk session the moment it trades it.
+
+One case is left. A malicious site could open the sign-in page in a window it keeps control
+of, get the person to press the button there, and then send that window to the return page
+with its own Clerk client. That person would end up signed in to the attacker's account (or
+signing up under the attacker's address). It does not give access to the person's own account.
+
+**Recommendation:** leave `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` and `CLERK_SECRET_KEY` off the
+LIVE (Production) projects until a Clerk production instance on Appsgain's own domain exists.
+A production instance keeps the client in an HttpOnly cookie on Clerk's subdomain, which no
+link can set. Keep the development keys on DEV, QA and UAT, which sit behind the password
+prompt. If LIVE must have Google and Microsoft sign-in before then, the owner accepts the
+remaining risk described above.
+
+### Moving LIVE to a production instance
+
+1. In the Clerk dashboard, create the **production instance** for the same application. SSO
+   connection settings are not copied from development, so set them again there.
+2. Add the domain the web app is served from (for example `app.appsgain.app`) and create the
+   DNS records Clerk lists on its **Domains** page. When they are verified, deploy the
+   certificates from the Clerk dashboard.
+3. **Google:** in Google Cloud Console, create an OAuth client of type *Web application*.
+   Add the web app's address under **Authorized JavaScript origins** and the **Authorized
+   redirect URI** Clerk shows on its Google connection page. Paste the client ID and secret
+   into that page (custom credentials) and publish the OAuth consent screen.
+4. **Microsoft:** in Microsoft Entra ID, register an app for accounts in any organisation and
+   personal Microsoft accounts, add Clerk's redirect URI as a *Web* redirect URI, create a
+   client secret and paste the client ID and secret into Clerk's Microsoft connection.
+   - Add the `xms_edov` optional claim as Clerk's Microsoft guide describes. Without it, Clerk
+     marks Microsoft addresses as unverified and the API refuses every Microsoft sign-in.
+   - Microsoft client secrets expire after at most 24 months. Note the date and renew it
+     before then, or Microsoft sign-in stops working.
+5. Put the `pk_live_` and `sk_live_` keys on the **Production** environment of the web and API
+   projects, keep the development keys on DEV, QA and UAT, and redeploy both projects.
+6. On LIVE, sign in with a Google account and with a Microsoft account, and sign up once with
+   an address that has no account yet.
 
 ## Background jobs
 
@@ -265,6 +403,8 @@ suspended with the function.
    - `https://api.appsgain.app/api/health/ready` answers `{"status":"ok","database":"up"}`
    - sign in, open the dashboard and leads, create and delete a test lead
    - request a password reset for your own account and receive the email
+   - "Continue with Google" signs you in, once Clerk is set up (see "Google and Microsoft
+     sign-in")
    - the next "Background jobs" run in GitHub Actions shows LIVE succeeding
 
 Urgent fixes take the same path, just quickly. There is no direct route to `main`.
@@ -302,9 +442,10 @@ Urgent fixes take the same path, just quickly. There is no direct route to `main
 - **4.5 MB** is the most one API request or response can carry on Vercel Functions. A larger
   CSV import has to be split.
 - **300 seconds** is the default time limit for one API call; Pro can raise it to 800.
-- **Three limits are held in memory:** reset emails, verification-code emails and
-  verification-code guesses. Each function instance keeps its own count, and on Vercel
-  several instances can run at once. That makes the limits looser than on one server,
+- **Four limits are held in memory:** reset emails, verification-code emails,
+  verification-code guesses and Google or Microsoft sign-ins (30 a minute per network
+  address). Each function instance keeps its own count, and on Vercel several instances can
+  run at once. That makes the limits looser than on one server,
   guesses included. Sign-in lockouts are stored in the database and are not affected.
   Moving these counts into the database or Redis is worth doing before LIVE.
 - **Live call audio** will need WebSockets. Vercel Functions support them only in beta

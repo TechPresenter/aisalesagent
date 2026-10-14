@@ -109,6 +109,8 @@ export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
   const [changingPassword, setChangingPassword] = useState(false);
   // Stable: the dialog resets its fields whenever this changes.
   const closePasswordDialog = useCallback(() => setChangingPassword(false), []);
+  // Bumped when a first password is set, so the Security tab reloads and offers 2FA.
+  const [securityVersion, setSecurityVersion] = useState(0);
   const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
   const [workspace, setWorkspace] = useState<TenantSummary | null | undefined>(undefined);
   const [wallet, setWallet] = useState<CreditWallet | null | undefined>(undefined);
@@ -250,7 +252,10 @@ export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
           )}
 
           {tab === "Security" && (
-            <SecurityTab onChangePassword={() => setChangingPassword(true)} />
+            <SecurityTab
+              key={securityVersion}
+              onChangePassword={() => setChangingPassword(true)}
+            />
           )}
 
           {/* The workspace itself lives under General; Profile is about the person. */}
@@ -276,7 +281,17 @@ export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
         </div>
       </div>
 
-      <ChangePasswordDialog open={changingPassword} onClose={closePasswordDialog} />
+      <ChangePasswordDialog
+        open={changingPassword}
+        onClose={closePasswordDialog}
+        onPasswordSet={() => {
+          setSecurityVersion((version) => version + 1);
+          setNotice({
+            tone: "ok",
+            text: "Password set. You can sign in with it as well, and turn on two-factor authentication.",
+          });
+        }}
+      />
     </>
   );
 }
