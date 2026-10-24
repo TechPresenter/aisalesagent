@@ -244,6 +244,13 @@ export class TwoFactorService {
     if (!user || user.tenantId !== caller.tenantId || user.status !== "ACTIVE") {
       throw new UnauthorizedException("This account is not active.");
     }
+    // Signed up with Google or Microsoft: there is no password to confirm with yet, and
+    // "not correct" would send the person looking for one they were never given.
+    if (!user.hasPassword) {
+      throw new BadRequestException(
+        "Your account signs in with Google or Microsoft and has no password yet. Set a password first, then try again.",
+      );
+    }
     if (!(await argon2.verify(user.passwordHash, password))) {
       throw new UnauthorizedException("Your password is not correct.");
     }

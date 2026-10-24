@@ -61,15 +61,24 @@ export class UsersService {
   /**
    * Changes a member's role, status or details.
    *
-   * Two rules, both about not letting a workspace lock itself out or let someone promote
-   * themselves past their own authority:
+   * Three rules, all about not letting a workspace lock itself out or let someone act
+   * past their own authority:
    *
-   *  - Nobody may grant a role above their own, or change the role of someone ranked
-   *    above them. Otherwise an ADMIN could make themselves OWNER through a second
-   *    account, and the hierarchy would be decorative.
+   *  - Nobody may change anything about someone ranked above them — role, status, name
+   *    or phone — nor grant a role above their own. Checking rank only on role changes
+   *    left an ADMIN free to disable the OWNER, which is a takeover by other means: the
+   *    one person who could undo it can no longer sign in. Equals may still manage each
+   *    other, so two ADMINs are not stuck waiting on the OWNER for routine changes.
    *  - The last active OWNER cannot be demoted or disabled. There must always be someone
    *    who can administer the workspace, and discovering otherwise is a support ticket
    *    nobody can resolve from inside the product.
+   *  - Disabling or demoting someone ends their sessions. Refresh re-reads the account,
+   *    so a disabled member was already refused there, but a demoted one would simply
+   *    refresh into a new session at the lower role and keep every device they were
+   *    signed in on. Revoking makes either change mean signed out everywhere at the next
+   *    refresh, so they come back, if at all, by signing in under the new terms. The
+   *    access token they already hold lives out its 15 minutes, as jwt.strategy.ts
+   *    explains.
    */
   async update(
     id: string,
@@ -79,13 +88,12 @@ export class UsersService {
     const target = await this.db.user.findUnique({ where: { id } });
     if (!target) throw new NotFoundException("That person is not a member of this workspace.");
 
-    if (input.role !== undefined) {
-      if (!hasAtLeastRole(actor.role, input.role)) {
-        throw new ForbiddenException("You cannot grant a role above your own.");
-      }
-      if (ROLE_RANK[target.role as Role] > ROLE_RANK[actor.role]) {
-        throw new ForbiddenException("You cannot change the role of someone above you.");
-      }
+    const targetRank = ROLE_RANK[target.role as Role];
+    if (targetRank > ROLE_RANK[actor.role]) {
+      throw new ForbiddenException("You cannot change someone ranked above you.");
+    }
+    if (input.role !== undefined && !hasAtLeastRole(actor.role, input.role)) {
+      throw new ForbiddenException("You cannot grant a role above your own.");
     }
 
     const beingDisabled = input.status === "DISABLED";
@@ -106,15 +114,43 @@ export class UsersService {
       throw new BadRequestException("You cannot disable your own account.");
     }
 
-    return this.db.user.update({
-      where: { id },
-      data: {
-        role: input.role,
-        status: input.status,
-        name: input.name?.trim(),
-        phone: input.phone,
-      },
-      select: MEMBER_SELECT,
+    // Any status other than ACTIVE is refused at sign-in and refresh alike, so it ends
+    // sessions just as DISABLED does.
+    const losingAccess = input.status !== undefined && input.status !== "ACTIVE";
+    const demoted = input.role !== undefined && ROLE_RANK[input.role] < targetRank;
+
+    // One transaction, so the change and the sign-out land together: a member is never
+    // left demoted with their old sessions still able to refresh.
+    //
+    // updateMany and findFirst rather than update, on purpose. The scoped client checks
+    // a single-row update's ownership with a read on the *outer* client, and inside an
+    // interactive transaction that read waits for a connection the transaction is
+    // holding. With a pool of one connection — the PGlite dev and test databases', and a
+    // common serverless setting — it waits until the transaction times out. The
+    // filterable operations take their tenant filter in the where clause instead and run
+    // on the transaction's own connection.
+    return this.db.$transaction(async (tx) => {
+      const { count } = await tx.user.updateMany({
+        where: { id },
+        data: {
+          role: input.role,
+          status: input.status,
+          name: input.name?.trim(),
+          phone: input.phone,
+        },
+      });
+      if (count === 0) {
+        throw new NotFoundException("That person is not a member of this workspace.");
+      }
+
+      if (losingAccess || demoted) {
+        await tx.refreshToken.updateMany({
+          where: { userId: id, revokedAt: null },
+          data: { revokedAt: new Date() },
+        });
+      }
+
+      return tx.user.findFirstOrThrow({ where: { id }, select: MEMBER_SELECT });
     });
   }
 

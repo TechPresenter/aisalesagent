@@ -123,9 +123,10 @@ describe("Tenant isolation", () => {
       expect(await prisma.lead.findUnique({ where: { id: betaLeadId } })).not.toBeNull();
     });
 
-    it("ignores a tenantId smuggled into a create body", async () => {
-      // ValidationPipe's whitelist strips the unknown property; forbidNonWhitelisted
-      // turns it into an outright rejection. Either way the lead cannot land in beta.
+    it("refuses a tenantId smuggled into a create body", async () => {
+      // TenantGuard reads a tenantId from the body as well as the path and query, and
+      // refuses one naming another workspace before ValidationPipe would have rejected the
+      // unknown property. Either way the lead cannot land in beta.
       await request(app.getHttpServer())
         .post("/api/leads")
         .set(authed(alpha))
@@ -134,7 +135,7 @@ describe("Tenant isolation", () => {
           phone: "9876500003",
           tenantId: beta.tenantId,
         })
-        .expect(400);
+        .expect(403);
 
       const betaLeads = await prisma.lead.findMany({ where: { tenantId: beta.tenantId } });
       expect(betaLeads).toHaveLength(1);
@@ -145,6 +146,115 @@ describe("Tenant isolation", () => {
       const created = await createLead(app, alpha, { name: "Second Alpha", phone: "9876500004" });
       const row = await prisma.lead.findUnique({ where: { id: created.id } });
       expect(row?.tenantId).toBe(alpha.tenantId);
+    });
+  });
+
+  describe("linking to another tenant's records from a request body", () => {
+    // A different attack from an id in the URL. The row being written is the caller's
+    // own, so the scoped client lets the write through, and only the foreign key stands
+    // in the way — which accepts any workspace's campaign or member. Stored, the link
+    // would show the other workspace's names through every include that follows it.
+    let alphaCampaignId: string;
+    let betaCampaignId: string;
+
+    beforeEach(async () => {
+      alphaCampaignId = (
+        await prisma.campaign.create({ data: { tenantId: alpha.tenantId, name: "Alpha Outreach" } })
+      ).id;
+      betaCampaignId = (
+        await prisma.campaign.create({ data: { tenantId: beta.tenantId, name: "Beta Launch" } })
+      ).id;
+    });
+
+    const note = (extra: Record<string, unknown>) => ({
+      leadId: alphaLeadId,
+      content: "Spoke to the practice manager.",
+      ...extra,
+    });
+
+    const event = (extra: Record<string, unknown> = {}) => ({
+      title: "Demo",
+      startAt: "2026-11-02T10:00:00.000Z",
+      endAt: "2026-11-02T10:30:00.000Z",
+      ...extra,
+    });
+
+    it("refuses a note filed under another tenant's campaign, or on its lead", async () => {
+      await request(app.getHttpServer())
+        .post("/api/notes")
+        .set(authed(alpha))
+        .send(note({ campaignId: betaCampaignId }))
+        .expect(404);
+
+      await request(app.getHttpServer())
+        .post("/api/notes")
+        .set(authed(alpha))
+        .send(note({ leadId: betaLeadId }))
+        .expect(404);
+
+      expect(await prisma.salesNote.count()).toBe(0);
+    });
+
+    it("still files a note under the caller's own campaign", async () => {
+      const created = await request(app.getHttpServer())
+        .post("/api/notes")
+        .set(authed(alpha))
+        .send(note({ campaignId: alphaCampaignId }))
+        .expect(201);
+
+      expect(created.body.campaignId).toBe(alphaCampaignId);
+    });
+
+    it("refuses a calendar event owned by another tenant's member or under its campaign", async () => {
+      await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event({ ownerId: beta.ownerId }))
+        .expect(404);
+
+      await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event({ campaignId: betaCampaignId }))
+        .expect(404);
+
+      expect(await prisma.calendarEvent.count()).toBe(0);
+
+      // The same body with the caller's own ids goes through, so the 404s above are the
+      // check and not a broken route.
+      const own = await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event({ ownerId: alpha.ownerId, campaignId: alphaCampaignId }))
+        .expect(201);
+      expect(own.body.ownerId).toBe(alpha.ownerId);
+      expect(own.body.campaignId).toBe(alphaCampaignId);
+    });
+
+    it("refuses to hand an existing event to another tenant's member", async () => {
+      const created = await request(app.getHttpServer())
+        .post("/api/calendar/events")
+        .set(authed(alpha))
+        .send(event())
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .patch(`/api/calendar/events/${created.body.id}`)
+        .set(authed(alpha))
+        .send({ ownerId: beta.ownerId })
+        .expect(404);
+
+      const row = await prisma.calendarEvent.findUnique({ where: { id: created.body.id } });
+      expect(row?.ownerId).toBe(alpha.ownerId);
+
+      // Clearing the owner is not a foreign id and still works.
+      await request(app.getHttpServer())
+        .patch(`/api/calendar/events/${created.body.id}`)
+        .set(authed(alpha))
+        .send({ ownerId: null })
+        .expect(200);
+      const cleared = await prisma.calendarEvent.findUnique({ where: { id: created.body.id } });
+      expect(cleared?.ownerId).toBeNull();
     });
   });
 
@@ -217,10 +327,17 @@ describe("Tenant isolation", () => {
         .send({ subdomain: alpha.subdomain, email: alpha.ownerEmail, password: TEST_PASSWORD })
         .expect(200);
 
-      await request(app.getHttpServer())
-        .get(`/api/leads/${betaLeadId}`)
-        .set("Authorization", `Bearer ${login.body.accessToken}`)
-        .expect(404);
+      // SUPER_ADMIN holds no workspace permissions at all (ROLE_PERMISSIONS in
+      // @appsgain/shared), so PermissionGuard refuses before any row is looked up: the same
+      // answer for another tenant's lead as for one that does not exist, so it confirms
+      // nothing about either.
+      for (const id of [betaLeadId, "00000000-0000-4000-8000-000000000000"]) {
+        const refused = await request(app.getHttpServer())
+          .get(`/api/leads/${id}`)
+          .set("Authorization", `Bearer ${login.body.accessToken}`)
+          .expect(403);
+        expect(refused.body.message).toBe("Missing permission: leads.view");
+      }
     });
 
     it("is not rejected outright for naming another tenant, unlike a normal user", async () => {
@@ -259,8 +376,11 @@ describe("Tenant isolation", () => {
       const scoped = prisma.forTenant(alpha.tenantId);
       const leads = await scoped.lead.findMany({ where: { tenantId: beta.tenantId } });
 
-      // The injected filter is applied last and wins.
-      expect(leads).toHaveLength(0);
+      // The injected filter is applied last and wins, so asking for beta's leads returns
+      // alpha's own (the one from the test above) rather than nothing, and never beta's.
+      expect(leads).toHaveLength(1);
+      expect(leads.every((lead) => lead.tenantId === alpha.tenantId)).toBe(true);
+      expect(leads.map((lead) => lead.id)).not.toContain(betaLeadId);
     });
 
     it("returns null from findUnique for another tenant's row", async () => {

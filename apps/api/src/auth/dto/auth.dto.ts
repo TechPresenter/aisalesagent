@@ -1,5 +1,20 @@
-import { IsEmail, IsNotEmpty, IsString, Matches, MaxLength, MinLength } from "class-validator";
-import type { LoginRequest, LogoutRequest, RefreshRequest } from "@appsgain/shared";
+import {
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from "class-validator";
+import { Transform } from "class-transformer";
+import type {
+  ClerkSignInRequest,
+  LoginRequest,
+  LogoutRequest,
+  RefreshRequest,
+  SsoSelectRequest,
+} from "@appsgain/shared";
 
 /**
  * The `implements` clauses are the point of these classes: class-validator gives the
@@ -52,6 +67,17 @@ export class ChangePasswordDto {
   @MaxLength(200)
   currentPassword!: string;
 
+  @IsString()
+  @MinLength(12, { message: "newPassword must be at least 12 characters" })
+  @MaxLength(200)
+  newPassword!: string;
+}
+
+/**
+ * An account's first password, for one that signed up with Google or Microsoft and so
+ * has no current password to give. Same floor as everywhere else a password is set.
+ */
+export class SetPasswordDto {
   @IsString()
   @MinLength(12, { message: "newPassword must be at least 12 characters" })
   @MaxLength(200)
@@ -134,6 +160,40 @@ export class PasswordAndCodeDto extends CurrentPasswordDto {
   @MinLength(6)
   @MaxLength(20)
   code!: string;
+}
+
+/**
+ * Google or Microsoft sign-in: the Clerk session token, and the workspace when the page
+ * knows it. A blank workspace field arrives as "", which means "not named", not invalid.
+ */
+export class ClerkSignInDto implements ClerkSignInRequest {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(8192)
+  token!: string;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    typeof value === "string" ? value.trim().toLowerCase() || undefined : value,
+  )
+  @IsString()
+  @Matches(SUBDOMAIN_PATTERN, {
+    message: "workspace must be lowercase letters, digits and hyphens",
+  })
+  subdomain?: string;
+}
+
+export class SsoSelectDto implements SsoSelectRequest {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(2048)
+  selectionToken!: string;
+
+  @IsString()
+  @Matches(SUBDOMAIN_PATTERN, {
+    message: "workspace must be lowercase letters, digits and hyphens",
+  })
+  subdomain!: string;
 }
 
 export class AcceptInvitationDto extends TokenDto {

@@ -23,9 +23,11 @@ function messageOf(cause: unknown): string {
  *
  * Every 2FA change asks for the password first, because the server does: a session left
  * open on someone else's desk should not be enough to add their phone to this account, or
- * to take the second factor away.
+ * to take the second factor away. An account that signed up with Google or Microsoft has
+ * no password yet, so it is offered `onSetPassword` first rather than a field it cannot
+ * fill in.
  */
-export function AccountSecurityCards() {
+export function AccountSecurityCards({ onSetPassword }: { onSetPassword?: () => void }) {
   const [overview, setOverview] = useState<SecurityOverview | null>(null);
   const [failed, setFailed] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -130,6 +132,20 @@ export function AccountSecurityCards() {
                 Turn off
               </Button>
             </div>
+          </>
+        ) : overview && !overview.hasPassword ? (
+          <>
+            <p className="mt-1 text-[13px] leading-relaxed text-slate-500">
+              Add a second step to signing in: a six-digit code from an authenticator app. You sign in with Google or
+              Microsoft and have no password yet, and turning this on asks for one, so set a password first.
+            </p>
+            {onSetPassword && (
+              <div className="mt-4">
+                <Button variant="secondary" className="h-10" onClick={onSetPassword}>
+                  Set a password
+                </Button>
+              </div>
+            )}
           </>
         ) : (
           <>

@@ -10,6 +10,15 @@ import type { Tone } from "./status";
 
 export const YEARLY_DISCOUNT = 0.2;
 
+/**
+ * The longest any plan keeps call recordings. Retention is always a number of days: a
+ * recording kept forever is personal data kept forever, which no privacy policy can
+ * promise, and the API's retention sweep deletes on a finite schedule regardless
+ * (DEFAULT_RETENTION_DAYS in apps/api/src/recordings/recordings-retention.ts). Enterprise
+ * gets this ceiling; what a given customer is offered under it is agreed in the quote.
+ */
+export const MAX_RECORDING_RETENTION_DAYS = 365;
+
 export type BillingPeriod = "monthly" | "yearly";
 
 /** Keyed rather than imported so the data module stays free of React. */
@@ -40,12 +49,12 @@ export const plans: Plan[] = [
   {
     id: "starter",
     name: "Starter",
-    tagline: "Perfect for small clinics getting started",
+    tagline: "Perfect for small teams getting started",
     monthlyPrice: 2999,
     icon: "starter",
     tone: "blue",
     cta: "Get Started",
-    bestFor: "Best for individual clinics",
+    bestFor: "Best for founders and single sales teams",
     features: [
       { label: "500 AI calls per month", included: true },
       { label: "Basic AI voice agent", included: true },
@@ -61,13 +70,13 @@ export const plans: Plan[] = [
   {
     id: "professional",
     name: "Professional",
-    tagline: "Great for growing healthcare businesses",
+    tagline: "Great for growing sales teams",
     monthlyPrice: 9999,
     icon: "professional",
     tone: "amber",
     featured: true,
     cta: "Get Started",
-    bestFor: "Best for multi-location clinics",
+    bestFor: "Best for teams running several campaigns",
     features: [
       { label: "2,500 AI calls per month", included: true },
       { label: "Advanced AI voice agent", included: true },
@@ -83,12 +92,12 @@ export const plans: Plan[] = [
   {
     id: "business",
     name: "Business",
-    tagline: "For large teams and multi-location clinics",
+    tagline: "For large teams and multi-location businesses",
     monthlyPrice: 24999,
     icon: "business",
     tone: "blue",
     cta: "Get Started",
-    bestFor: "Best for established healthcare chains",
+    bestFor: "Best for established sales organisations",
     features: [
       { label: "10,000 AI calls per month", included: true },
       { label: "Everything in Professional", included: true },
@@ -109,17 +118,17 @@ export const plans: Plan[] = [
     icon: "enterprise",
     tone: "purple",
     cta: "Talk to Sales",
-    bestFor: "Best for hospitals & enterprise groups",
+    bestFor: "Best for enterprises and business groups",
     features: [
-      { label: "Unlimited AI calls", included: true },
+      { label: "Custom AI call volume", included: true },
       { label: "Everything in Business", included: true },
-      { label: "Custom integrations (EMR, HIS)", included: true },
+      { label: `Call recordings (up to ${MAX_RECORDING_RETENTION_DAYS} days)`, included: true },
+      { label: "Custom integrations", included: true },
       { label: "White-label solution", included: true },
       { label: "Advanced security & compliance", included: true },
       { label: "Dedicated success manager", included: true },
       { label: "SLA & uptime guarantee", included: true },
       { label: "Custom reporting", included: true },
-      { label: "On-premise / Private cloud (optional)", included: true },
     ],
   },
 ];
@@ -137,15 +146,18 @@ export interface CompareRow {
 }
 
 export const compareRows: CompareRow[] = [
-  { feature: "AI Calls per Month", values: ["500", "2,500", "10,000", "Unlimited"] },
-  { feature: "Call Recordings", values: ["7 days", "30 days", "90 days", "Unlimited"] },
+  { feature: "AI Calls per Month", values: ["500", "2,500", "10,000", "Custom"] },
+  {
+    feature: "Call Recordings",
+    values: ["7 days", "30 days", "90 days", `Up to ${MAX_RECORDING_RETENTION_DAYS} days`],
+  },
   { feature: "AI Transcripts", values: [false, true, true, true] },
   { feature: "Sales Notes & Follow-ups", values: [false, true, true, true] },
   { feature: "Advanced Analytics", values: ["Basic", true, true, true] },
   { feature: "Team Members", values: ["1", "3", "10", "Unlimited"] },
   {
     feature: "Integrations",
-    values: [false, "WhatsApp, Email", "CRM, WhatsApp, Email", "Custom (EMR, HIS, etc.)"],
+    values: [false, "WhatsApp, Email", "CRM, WhatsApp, Email", "Custom"],
   },
   { feature: "Support", values: ["Email", "Priority", "Priority", "Dedicated"] },
 ];

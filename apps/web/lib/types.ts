@@ -142,6 +142,8 @@ export interface LeadDetail extends Lead {
   /** AI persona assigned to this lead — name and language, e.g. "Anjali (Hindi)". */
   assignedAgent?: AIAgentPersona;
   priority: LeadPriority;
+  /** On the do-not-call list: never dialled. Absent on seed rows. */
+  doNotCall?: boolean;
   /** ISO timestamp of the most recent call attempt; absent for never-contacted leads. */
   lastContactedAt?: string;
   nextFollowUp?: FollowUp;

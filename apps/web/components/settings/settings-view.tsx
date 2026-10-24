@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bell,
   CreditCard,
   Crown,
   Loader2,
+  Mail,
   Phone,
   Plug,
   Plus,
@@ -17,7 +18,7 @@ import {
   Users,
   User,
 } from "lucide-react";
-import { ROLES, type TenantSummary } from "@appsgain/shared";
+import type { Role, TenantSummary } from "@appsgain/shared";
 import { Card, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,8 +26,13 @@ import { BillingTab } from "@/components/settings/billing-tab";
 import { CallSettingsTab } from "@/components/settings/call-settings-tab";
 import { ChangePasswordDialog } from "@/components/settings/change-password-dialog";
 import { IntegrationsTab } from "@/components/settings/integrations-tab";
+import {
+  InvitationLinkDialog,
+  InviteMemberDialog,
+} from "@/components/settings/invite-member-dialog";
 import { NotificationsTab } from "@/components/settings/notifications-tab";
 import { SecurityTab } from "@/components/settings/security-tab";
+import { appBrand } from "@/config/app-brand";
 import {
   ApiError,
   creditsApi,
@@ -34,10 +40,19 @@ import {
   usersApi,
   workspaceApi,
   type CreditWallet,
+  type InvitationSent,
+  type PendingInvitation,
+  type SessionUser,
   type UserStatus,
   type WorkspaceMember,
 } from "@/lib/api-client";
-import { usePermission, useSessionUser } from "@/lib/use-session";
+import {
+  assignableRoles,
+  canAssign,
+  expiryLabel,
+  workspaceDeletionMailto,
+} from "@/lib/team-invites";
+import { toRole, usePermission, useSessionUser } from "@/lib/use-session";
 import { cn, formatDate, formatNumber, initialsOf } from "@/lib/utils";
 
 const TABS = [
@@ -96,8 +111,9 @@ const STATUS_TONE: Record<UserStatus, "green" | "amber" | "gray"> = {
  *
  * Everything shown is read from the API, and everything editable saves through an
  * endpoint that exists: your name and phone (`PATCH /users/:id`), a teammate's role and
- * access. What the API cannot do yet — change a password, edit workspace details, invite
- * someone, buy credits — is shown as unavailable rather than as a form that would not save.
+ * access, invitations (`/users/invitations`). What the API cannot do yet is shown as
+ * unavailable rather than as a form that would not save — buying credits — or handed to
+ * support, which is how a workspace is deleted until that can be done safely in-app.
  */
 export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
   const router = useRouter();
@@ -109,20 +125,38 @@ export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
   const [changingPassword, setChangingPassword] = useState(false);
   // Stable: the dialog resets its fields whenever this changes.
   const closePasswordDialog = useCallback(() => setChangingPassword(false), []);
+  // Bumped when a first password is set, so the Security tab reloads and offers 2FA.
+  const [securityVersion, setSecurityVersion] = useState(0);
   const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
   const [workspace, setWorkspace] = useState<TenantSummary | null | undefined>(undefined);
   const [wallet, setWallet] = useState<CreditWallet | null | undefined>(undefined);
   const [notice, setNotice] = useState<Notice | null>(null);
+  // Undefined while loading, null if the list could not be read.
+  const [invitations, setInvitations] = useState<PendingInvitation[] | null | undefined>(undefined);
+  const [inviting, setInviting] = useState(false);
+  // A resend's fresh link, shown until the dialog is closed.
+  const [resent, setResent] = useState<InvitationSent | null>(null);
+  const actorRole = toRole(user?.role);
+  // What this person may hand out, to an invitee or a teammate: their own role and below.
+  const roles = useMemo(() => assignableRoles(actorRole), [actorRole]);
+  // Stable, like closePasswordDialog: the dialogs' focus handling depends on them.
+  const closeInvite = useCallback(() => setInviting(false), []);
+  const closeResent = useCallback(() => setResent(null), []);
 
   const loadMembers = useCallback(() => {
     usersApi.list().then(setMembers, () => setMembers([]));
   }, []);
 
+  const loadInvitations = useCallback(() => {
+    usersApi.invitations().then(setInvitations, () => setInvitations(null));
+  }, []);
+
   useEffect(() => {
     loadMembers();
+    loadInvitations();
     workspaceApi.mine().then(setWorkspace, () => setWorkspace(null));
     creditsApi.wallet().then(setWallet, () => setWallet(null));
-  }, [loadMembers]);
+  }, [loadMembers, loadInvitations]);
 
   useEffect(() => {
     if (!notice) return;
@@ -221,13 +255,35 @@ export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
           )}
 
           {tab === "Team" && (
-            <TeamCard
-              members={members}
-              selfId={user?.id}
-              canManage={canManageTeam}
-              onChanged={done}
-              onError={(cause) => fail(cause, "Could not update that member.")}
-            />
+            <>
+              <TeamCard
+                members={members}
+                selfId={user?.id}
+                canManage={canManageTeam}
+                roles={roles}
+                onInvite={() => setInviting(true)}
+                onChanged={done}
+                onError={(cause) => fail(cause, "Could not update that member.")}
+              />
+              <InvitationsCard
+                invitations={invitations}
+                canManage={canManageTeam}
+                actorRole={actorRole}
+                onResent={(sent) => {
+                  setResent(sent);
+                  loadInvitations();
+                }}
+                onRevoked={(email) => {
+                  setNotice({ tone: "ok", text: `The invitation to ${email} was withdrawn.` });
+                  loadInvitations();
+                }}
+                onError={(cause) => {
+                  fail(cause, "Could not update that invitation.");
+                  // Someone may have accepted or withdrawn it meanwhile; show what is true now.
+                  loadInvitations();
+                }}
+              />
+            </>
           )}
 
           {tab === "Billing" && <BillingTab wallet={wallet} />}
@@ -250,7 +306,10 @@ export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
           )}
 
           {tab === "Security" && (
-            <SecurityTab onChangePassword={() => setChangingPassword(true)} />
+            <SecurityTab
+              key={securityVersion}
+              onChangePassword={() => setChangingPassword(true)}
+            />
           )}
 
           {/* The workspace itself lives under General; Profile is about the person. */}
@@ -272,11 +331,29 @@ export function SettingsView({ query = {} }: { query?: SettingsQuery }) {
         <div className="space-y-4">
           <UsageCard wallet={wallet} />
           <TeamPreview members={members} onViewAll={() => setTab("Team")} />
-          <DangerZone />
+          <DangerZone workspace={workspace} user={user} isOwner={actorRole === "OWNER"} />
         </div>
       </div>
 
-      <ChangePasswordDialog open={changingPassword} onClose={closePasswordDialog} />
+      <InviteMemberDialog
+        open={inviting}
+        roles={roles}
+        onClose={closeInvite}
+        onInvited={loadInvitations}
+      />
+      <InvitationLinkDialog sent={resent} onClose={closeResent} />
+
+      <ChangePasswordDialog
+        open={changingPassword}
+        onClose={closePasswordDialog}
+        onPasswordSet={() => {
+          setSecurityVersion((version) => version + 1);
+          setNotice({
+            tone: "ok",
+            text: "Password set. You can sign in with it as well, and turn on two-factor authentication.",
+          });
+        }}
+      />
     </>
   );
 }
@@ -501,16 +578,26 @@ function CompanyCard({
   );
 }
 
-function TeamCard({
+/**
+ * The member list and the Invite Member button. Exported, with InvitationsCard and
+ * DangerZone, so settings-view.spec.ts can render each one with the props that decide
+ * what it offers, without a router or a signed-in session.
+ */
+export function TeamCard({
   members,
   selfId,
   canManage,
+  roles,
+  onInvite,
   onChanged,
   onError,
 }: {
   members: WorkspaceMember[] | null;
   selfId?: string;
   canManage: boolean;
+  /** The roles the signed-in person may hand out: their own and below, never SUPER_ADMIN. */
+  roles: readonly Role[];
+  onInvite: () => void;
   onChanged: (message: string) => void;
   onError: (cause: unknown) => void;
 }) {
@@ -543,9 +630,10 @@ function TeamCard({
         <CardTitle>Team Members</CardTitle>
         <button
           type="button"
-          disabled
-          title="Inviting teammates needs an invite endpoint the API does not have yet."
-          className="inline-flex shrink-0 cursor-not-allowed items-center gap-1 rounded-btn border border-slate-200 px-2.5 py-1.5 text-[12px] font-medium text-slate-400"
+          disabled={!canManage}
+          onClick={onInvite}
+          title={canManage ? undefined : "Your role cannot invite teammates."}
+          className="inline-flex shrink-0 items-center gap-1 rounded-btn bg-brand-green px-3 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-[#15A45D] disabled:cursor-not-allowed disabled:bg-transparent disabled:font-medium disabled:text-slate-400 disabled:ring-1 disabled:ring-inset disabled:ring-slate-200"
         >
           <Plus className="h-3 w-3" strokeWidth={2.4} />
           Invite Member
@@ -561,7 +649,9 @@ function TeamCard({
           {members.map((member) => {
             const self = member.id === selfId;
             const busy = busyId === member.id;
-            const manageable = canManage && !self;
+            // Nobody manages someone ranked above them — the API refuses it — so for those
+            // the role is shown, not offered as a choice that would only come back 403.
+            const manageable = canManage && !self && roles.includes(member.role as Role);
             return (
               <li key={member.id} className="flex flex-wrap items-center gap-3 py-3">
                 <Avatar name={member.name} />
@@ -590,7 +680,7 @@ function TeamCard({
                     }}
                     className="h-9 rounded-btn border border-slate-200 bg-surface px-2 text-[12.5px] text-brand-navy focus:border-brand-green focus:outline-none disabled:opacity-50"
                   >
-                    {ROLES.map((role) => (
+                    {roles.map((role) => (
                       <option key={role} value={role}>
                         {titleCase(role)}
                       </option>
@@ -634,6 +724,152 @@ function TeamCard({
                       {confirmingId === member.id ? "Confirm" : "Deactivate"}
                     </button>
                   ))}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Invitations nobody has answered yet, expired ones included so they can be sent again.
+ *
+ * Resend issues a new link and kills the old one, so it opens the link dialog: with email
+ * not configured, the new link on screen is the only copy anyone has. Withdrawing takes
+ * two presses, like deactivating a member, because the link someone is holding stops
+ * working at once.
+ */
+export function InvitationsCard({
+  invitations,
+  canManage,
+  actorRole,
+  onResent,
+  onRevoked,
+  onError,
+}: {
+  invitations: PendingInvitation[] | null | undefined;
+  canManage: boolean;
+  actorRole: Role | null;
+  onResent: (sent: InvitationSent) => void;
+  onRevoked: (email: string) => void;
+  onError: (cause: unknown) => void;
+}) {
+  const [busy, setBusy] = useState<{ id: string; action: "resend" | "revoke" } | null>(null);
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!confirmingId) return;
+    const timer = window.setTimeout(() => setConfirmingId(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [confirmingId]);
+
+  // Someone who cannot invite has nothing to do here unless there is something to see.
+  if (!canManage && !(invitations && invitations.length > 0)) return null;
+
+  async function resend(invitation: PendingInvitation) {
+    setBusy({ id: invitation.id, action: "resend" });
+    setConfirmingId(null);
+    try {
+      onResent(await usersApi.resendInvitation(invitation.id));
+    } catch (cause) {
+      onError(cause);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function revoke(invitation: PendingInvitation) {
+    setBusy({ id: invitation.id, action: "revoke" });
+    setConfirmingId(null);
+    try {
+      await usersApi.revokeInvitation(invitation.id);
+      onRevoked(invitation.email);
+    } catch (cause) {
+      onError(cause);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Card className="p-5">
+      <CardHeader className="p-0">
+        <CardTitle>Pending Invitations</CardTitle>
+        {invitations && invitations.length > 0 && (
+          <span className="tabular text-[12px] text-slate-400">{invitations.length}</span>
+        )}
+      </CardHeader>
+
+      {invitations === undefined ? (
+        <p className="mt-4 text-[13px] text-slate-400">Loading…</p>
+      ) : invitations === null ? (
+        <p className="mt-4 text-[13px] text-slate-500">Could not load the pending invitations.</p>
+      ) : invitations.length === 0 ? (
+        <p className="mt-4 text-[13px] text-slate-500">
+          No pending invitations. Invite Member creates one and gives you a link to share.
+        </p>
+      ) : (
+        <ul className="mt-3 divide-y divide-slate-100">
+          {invitations.map((invitation) => {
+            const working = busy?.id === invitation.id ? busy.action : null;
+            const expiry = expiryLabel(invitation.expiresAt, invitation.status);
+            return (
+              <li key={invitation.id} className="flex flex-wrap items-center gap-3 py-3">
+                <span
+                  aria-hidden
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500"
+                >
+                  <Mail className="h-4 w-4" strokeWidth={2.2} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13.5px] font-semibold text-brand-navy">
+                    {invitation.email}
+                    {invitation.name && (
+                      <span className="ml-1.5 text-[11.5px] font-normal text-slate-400">
+                        {invitation.name}
+                      </span>
+                    )}
+                  </p>
+                  <p className="truncate text-[12px] text-slate-500">
+                    {titleCase(invitation.role)}
+                    {invitation.invitedBy && (
+                      <> &middot; invited by {invitation.invitedBy.name}</>
+                    )}{" "}
+                    &middot; {formatDate(invitation.createdAt)}
+                  </p>
+                </div>
+
+                <Badge tone={expiry === "Expired" ? "gray" : "amber"}>{expiry}</Badge>
+
+                {canManage && canAssign(actorRole, invitation.role) && (
+                  <button
+                    type="button"
+                    disabled={working !== null}
+                    onClick={() => void resend(invitation)}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-btn border border-slate-200 px-3 text-[12.5px] font-semibold text-brand-navy transition-colors hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    {working === "resend" && (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.4} />
+                    )}
+                    Resend
+                  </button>
+                )}
+                {canManage && (
+                  <button
+                    type="button"
+                    disabled={working !== null}
+                    onClick={() =>
+                      confirmingId === invitation.id
+                        ? void revoke(invitation)
+                        : setConfirmingId(invitation.id)
+                    }
+                    className="h-9 rounded-btn border border-alert-red/40 px-3 text-[12.5px] font-semibold text-alert-red transition-colors hover:bg-alert-red/[0.06] disabled:opacity-50"
+                  >
+                    {confirmingId === invitation.id ? "Confirm" : "Revoke"}
+                  </button>
+                )}
               </li>
             );
           })}
@@ -749,7 +985,28 @@ function UsageCard({ wallet }: { wallet: CreditWallet | null | undefined }) {
   );
 }
 
-function DangerZone() {
+/**
+ * Deleting a workspace, for now, by asking support. Doing it in-app needs what the API
+ * does not have yet — a typed confirmation, a grace period, and a purge that keeps the
+ * invoices the law says to keep — and a button that deletes nothing is worse than an
+ * honest route to someone who can. Only the owner is offered it: support will check with
+ * the owner anyway, and a request from anyone else would only start that conversation.
+ */
+export function DangerZone({
+  workspace,
+  user,
+  isOwner,
+}: {
+  workspace: TenantSummary | null | undefined;
+  user: SessionUser | null;
+  isOwner: boolean;
+}) {
+  const mailto = workspaceDeletionMailto(appBrand.supportEmail, {
+    workspaceName: workspace?.name ?? user?.tenantName,
+    subdomain: workspace?.subdomain,
+    requesterEmail: user?.email,
+  });
+
   return (
     <Card className="border-alert-red/25 p-4">
       <div className="flex items-center gap-2">
@@ -757,18 +1014,31 @@ function DangerZone() {
         <h3 className="text-[15px] font-bold text-alert-red">Danger Zone</h3>
       </div>
       <p className="mt-1.5 text-[12.5px] leading-relaxed text-slate-600">
-        Deleting a workspace removes every lead, call and recording in it.
+        Deleting a workspace removes every lead, call and recording in it. Our support team
+        does it for you, after confirming with the workspace owner.
       </p>
-      <button
-        type="button"
-        disabled
-        title="Workspace deletion is not available from the app yet."
-        className="mt-3 flex h-10 w-full cursor-not-allowed items-center justify-center gap-2 rounded-btn border border-alert-red/40 text-[13px] font-semibold text-alert-red opacity-50"
-      >
-        <Trash2 className="h-4 w-4" strokeWidth={2.2} />
-        Delete Account
-      </button>
-      <p className="mt-2 text-[11.5px] text-slate-400">Not available from the app yet.</p>
+      {!isOwner ? (
+        <p className="mt-3 rounded-lg bg-slate-50 p-3 text-[12.5px] text-slate-500">
+          Only the workspace owner can ask for it to be deleted.
+        </p>
+      ) : mailto ? (
+        <>
+          <a
+            href={mailto}
+            className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-btn border border-alert-red/40 text-[13px] font-semibold text-alert-red transition-colors hover:bg-alert-red/[0.06]"
+          >
+            <Mail className="h-4 w-4" strokeWidth={2.2} />
+            Contact support to delete this workspace
+          </a>
+          <p className="mt-2 text-[11.5px] text-slate-400">
+            Opens an email to {appBrand.supportEmail} with your workspace details filled in.
+          </p>
+        </>
+      ) : (
+        <p className="mt-3 rounded-lg bg-slate-50 p-3 text-[12.5px] text-slate-500">
+          To delete this workspace, contact {appBrand.name} support.
+        </p>
+      )}
     </Card>
   );
 }

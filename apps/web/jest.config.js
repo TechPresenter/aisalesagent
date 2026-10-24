@@ -1,8 +1,10 @@
 /**
  * Unit tests for the browser-side logic that is worth testing directly: date arithmetic,
- * formatting, filter translation — the pure functions under lib/. Components are not
- * covered here; they are exercised against the real API by the smoke scripts in apps/api,
- * which is where a rendering bug would actually show up.
+ * formatting, filter translation — the pure functions under lib/. Components are mostly
+ * not covered here; they are exercised against the real API by the smoke scripts in
+ * apps/api, which is where a rendering bug would actually show up. The exceptions are
+ * screens whose markup depends on a deploy-time switch (a feature flag, a support
+ * contact): those are rendered to static markup with react-dom/server, once per setting.
  *
  * `testEnvironment: node` because none of these touch the DOM.
  */

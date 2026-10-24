@@ -3,6 +3,7 @@
 import {
   ApiError,
   callsApi,
+  campaignsApi,
   followUpsApi,
   isApiReachable,
   leadsApi,
@@ -23,16 +24,15 @@ import type { ActivityEvent, ActivityKind, LeadCall, LeadDetail, LeadNote } from
 /**
  * One place that decides where lead data comes from.
  *
- * With the API up (`docker-compose up && npm run dev`) this reads `GET /leads`. Without
- * it, it falls back to the seed set in mock-leads.ts and filters in memory, so the page
- * is developable and demoable before anyone has Postgres running.
+ * It reads `GET /leads`. In local development only, when the API is not running at all,
+ * it falls back to the seed set in mock-leads.ts and filters in memory, so the screens
+ * can be worked on without the API; `source` tells the page which one it is showing so it
+ * can say so on screen.
  *
- * The fallback is a scaffolding measure with a deliberate expiry: it exists so the UI
- * could be built against the real query shape before the database was provisioned, and
- * it should be deleted the moment login lands and every environment has an API. Two
- * things keep it honest in the meantime — it announces itself in the console, and
- * `source` is returned to the caller so the page can say on screen which one it is
- * showing rather than quietly presenting seed rows as live data.
+ * A production build never shows seed rows. A customer whose request failed must see
+ * that it failed and be able to retry — sixty invented leads presented as their
+ * pipeline is the worst possible answer. The same goes for an API that is up but returns
+ * an error, in any environment: the error reaches the caller.
  */
 
 export interface LeadPage {
@@ -46,26 +46,98 @@ export interface LeadPage {
 
 const DEFAULT_PAGE_SIZE = 10;
 
+/**
+ * Whether the seed set may stand in for an unreachable API. Read at call time so tests
+ * can exercise both sides; Next.js replaces it with a constant in a build.
+ */
+function seedFallbackAllowed(): boolean {
+  return process.env.NODE_ENV !== "production";
+}
+
 export async function fetchLeads(query: LeadQuery = {}): Promise<LeadPage> {
-  if (await isApiReachable()) {
-    try {
-      const response = await leadsApi.list({ pageSize: DEFAULT_PAGE_SIZE, ...query });
-      return {
-        leads: response.data.map(toLeadDetail),
-        total: response.total,
-        page: response.page,
-        pageSize: response.pageSize,
-        totalPages: response.totalPages,
-        source: "api",
-      };
-    } catch (error) {
-      // A reachable API that errors is a real problem, not a reason to quietly show seed
-      // data — but showing something beats showing a blank page, so it degrades and says so.
-      console.warn("[leads] API request failed, falling back to seed data", error);
-    }
+  if (seedFallbackAllowed() && !(await isApiReachable())) {
+    console.warn("[leads] API not reachable, showing seed data (development only)");
+    return filterSeed(query);
   }
 
-  return filterSeed(query);
+  const response = await leadsApi.list({ pageSize: DEFAULT_PAGE_SIZE, ...query });
+  return {
+    leads: response.data.map(toLeadDetail),
+    total: response.total,
+    page: response.page,
+    pageSize: response.pageSize,
+    totalPages: response.totalPages,
+    source: "api",
+  };
+}
+
+/** A bulk action asked to act on more leads than it allows; the message says so. */
+export class TooManyLeadsError extends Error {
+  constructor(
+    readonly matching: number,
+    readonly limit: number,
+  ) {
+    super(
+      `These filters match ${matching.toLocaleString("en-IN")} leads. Narrow them to ` +
+        `${limit.toLocaleString("en-IN")} or fewer and try again.`,
+    );
+    this.name = "TooManyLeadsError";
+  }
+}
+
+/** The API's largest page; collecting ids for a bulk action walks the list in these. */
+const ID_PAGE_SIZE = 200;
+
+/**
+ * Every lead id matching a list query, newest first, for a bulk action on "all matching
+ * leads". Refuses outright above `limit` rather than quietly acting on the first slice of
+ * a filter the user believes they selected in full.
+ *
+ * Paged rather than one request because the API caps a page at 200. A lead created while
+ * this runs can shift the pages by one row; ids are de-duplicated, and the worst case is
+ * that the newest lead is not included — the same answer as running a moment earlier.
+ */
+export async function collectLeadIds(
+  query: LeadQuery,
+  limit: number,
+  onProgress?: (collected: number, total: number) => void,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const response = await leadsApi.list({ ...query, page, pageSize: ID_PAGE_SIZE });
+    if (response.total > limit) throw new TooManyLeadsError(response.total, limit);
+    response.data.forEach((lead) => ids.add(lead.id));
+    totalPages = response.totalPages;
+    onProgress?.(ids.size, response.total);
+    page += 1;
+  } while (page <= totalPages);
+
+  return Array.from(ids);
+}
+
+/** The API's cap on ids in one `POST /campaigns/:id/leads`. */
+const CAMPAIGN_ADD_CHUNK = 1_000;
+
+/**
+ * Adds leads to a campaign in requests the API accepts, and adds up its answers.
+ * `skipped` counts leads already in the campaign and leads marked do-not-call, which the
+ * API never queues.
+ */
+export async function addLeadsToCampaign(
+  campaignId: string,
+  leadIds: string[],
+  add: typeof campaignsApi.addLeads = (id, ids) => campaignsApi.addLeads(id, ids),
+): Promise<{ added: number; skipped: number }> {
+  const total = { added: 0, skipped: 0 };
+  for (let start = 0; start < leadIds.length; start += CAMPAIGN_ADD_CHUNK) {
+    const result = await add(campaignId, leadIds.slice(start, start + CAMPAIGN_ADD_CHUNK));
+    total.added += result.added;
+    total.skipped += result.skipped;
+  }
+  return total;
 }
 
 /** A lead with everything its detail page shows, plus where it sits in the list. */
@@ -87,7 +159,7 @@ export interface LeadDetailResult {
  * API deliberately reports the same way.
  */
 export async function fetchLeadDetail(id: string): Promise<LeadDetailResult | undefined> {
-  if (!(await isApiReachable())) {
+  if (seedFallbackAllowed() && !(await isApiReachable())) {
     const index = seedLeads.findIndex((lead) => lead.id === id);
     if (index === -1) return undefined;
     return {
@@ -256,6 +328,7 @@ function toLeadDetail(lead: ApiLead): LeadDetail {
     contactPerson: lead.contactPerson ?? "—",
     tags: Array.isArray(lead.customFields?.tags) ? (lead.customFields.tags as string[]) : [],
     priority: lead.temperature === "HOT" ? "HIGH" : lead.temperature === "WARM" ? "MEDIUM" : "LOW",
+    doNotCall: lead.doNotCall,
     lastContactedAt: lead.lastContactedAt ?? undefined,
     scoreFactors: (lead.scoreReasons ?? []).map((reason) => ({
       label: reason.label,

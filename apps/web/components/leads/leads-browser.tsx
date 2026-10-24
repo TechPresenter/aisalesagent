@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { MoreVertical, RotateCcw } from "lucide-react";
+import { ListPlus, MoreVertical, RotateCcw } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { SearchInput } from "@/components/ui/search-input";
 import { FilterSelect, type FilterOption } from "@/components/ui/filter-select";
@@ -10,16 +11,21 @@ import { Pagination } from "@/components/ui/pagination";
 import { ScorePill } from "@/components/ui/score-pill";
 import { LeadSourceBadge, LeadStatusBadge } from "@/components/ui/status-badge";
 import { LeadDetailsPanel } from "@/components/leads/lead-details-panel";
+import { LeadIntakeActions } from "@/components/leads/add-lead-dialog";
+import { AddToCampaignDialog, type LeadSelection } from "@/components/leads/add-to-campaign-dialog";
 import { LEAD_SOURCE, LEAD_STATUS } from "@/lib/status";
 import { leadCities } from "@/lib/mock-leads";
 import {
+  ApiError,
   isApiReachable,
   leadsApi,
   usersApi,
   type ApiLead,
+  type LeadQuery,
   type WorkspaceMember,
 } from "@/lib/api-client";
 import { fetchLeads, type LeadPage } from "@/lib/leads-repository";
+import { usePermission } from "@/lib/use-session";
 import { cn, splitDateTime } from "@/lib/utils";
 import type { LeadDetail, LeadSource, LeadStatus } from "@/lib/types";
 
@@ -41,9 +47,12 @@ const DATE_WINDOWS: Record<string, number> = {
  * sixty seeded rows and falls over on sixty thousand real ones, and the failure arrives
  * in production rather than in review.
  *
- * `fetchLeads` falls back to seed data when the API is unreachable and reports which
- * source it used, so the banner below can say so rather than presenting seed rows as if
- * they were live.
+ * A failed request shows as a failure with a working Try again. Only in local
+ * development, with no API running at all, does `fetchLeads` fall back to seed rows, and
+ * the banner below says so.
+ *
+ * Ticked rows — or, Gmail-style, every lead the filters match — can be added to a
+ * campaign in one action, by a role that may edit campaigns and assign leads.
  */
 export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string }) {
   // Seeded from `?search=` so the header's search box can land here with a query.
@@ -59,12 +68,22 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<LeadPage | null>(null);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Bumped by Try again: re-running the effect with the same filters is the whole retry.
+  const [reloadKey, setReloadKey] = useState(0);
+  // "Every lead matching the filters", as opposed to the ticked ids in `checked`.
+  const [allMatching, setAllMatching] = useState(false);
+  // A snapshot of the selection while the Add to campaign dialog is open.
+  const [bulk, setBulk] = useState<LeadSelection | null>(null);
 
-  // Filter options from the workspace's own data. The seed lists only stand in while the
-  // API is down, when the table shows seed rows anyway. Cities are read from the newest
-  // 200 leads, since there is no distinct-cities endpoint yet.
-  const [cityOptions, setCityOptions] = useState<string[]>(leadCities);
+  const canEditCampaigns = usePermission("campaigns.edit");
+  const canAssignLeads = usePermission("leads.assign");
+  const canAddToCampaign = canEditCampaigns === true && canAssignLeads === true;
+
+  // Filter options from the workspace's own data. Cities are read from the newest 200
+  // leads, since there is no distinct-cities endpoint yet; the seed list stands in only
+  // when the table itself is showing seed rows (local development without an API).
+  const [cityOptions, setCityOptions] = useState<string[]>([]);
   const [owners, setOwners] = useState<{ id: string; name: string }[]>([]);
 
   useEffect(() => {
@@ -91,14 +110,9 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
     };
   }, []);
 
-  useEffect(() => {
-    // `cancelled` rather than an AbortController because the fetch itself is cheap and
-    // the thing that actually matters is not letting a slow response for page 1 overwrite
-    // a fast one for page 2. Ignoring the stale result is the whole fix.
-    let cancelled = false;
-
-    setLoading(true);
-    fetchLeads({
+  /** The filters as a list query, without paging — what "all matching" means. */
+  const filterQuery = useMemo<LeadQuery>(
+    () => ({
       search: search.trim() || undefined,
       status: status === ALL ? undefined : [status as LeadStatus],
       source: source === ALL ? undefined : [source as LeadSource],
@@ -106,13 +120,25 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
       scoreBand: scoreBand === ALL ? undefined : (scoreBand as "high" | "medium" | "low"),
       createdWithinDays: dateWindow === ALL ? undefined : DATE_WINDOWS[dateWindow],
       ownerId: agent === ALL ? undefined : agent,
-      page,
-      pageSize: PAGE_SIZE,
-    })
+    }),
+    [search, source, status, city, scoreBand, agent, dateWindow],
+  );
+
+  useEffect(() => {
+    // `cancelled` rather than an AbortController because the fetch itself is cheap and
+    // the thing that actually matters is not letting a slow response for page 1 overwrite
+    // a fast one for page 2. Ignoring the stale result is the whole fix.
+    let cancelled = false;
+
+    setLoading(true);
+    setLoadError(null);
+    fetchLeads({ ...filterQuery, page, pageSize: PAGE_SIZE })
       .then((next) => {
         if (cancelled) return;
         setResult(next);
-        setLoadError(false);
+        if (next.source === "seed") {
+          setCityOptions((current) => (current.length > 0 ? current : leadCities));
+        }
         // Select the first row of a fresh result rather than holding a selection that is
         // no longer on screen — a details panel showing a lead the table does not list
         // reads as a bug.
@@ -122,8 +148,13 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
             : (next.leads[0]?.id ?? null),
         );
       })
-      .catch(() => {
-        if (!cancelled) setLoadError(true);
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setLoadError(
+          cause instanceof ApiError
+            ? cause.message
+            : "We could not reach the server. Check your connection and try again.",
+        );
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -132,7 +163,7 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
     return () => {
       cancelled = true;
     };
-  }, [search, source, status, city, scoreBand, agent, dateWindow, page]);
+  }, [filterQuery, page, reloadKey]);
 
   const rows = result?.leads ?? [];
   const total = result?.total ?? 0;
@@ -145,6 +176,12 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
     search !== "" ||
     [source, status, city, scoreBand, agent, dateWindow].some((value) => value !== ALL);
 
+  const clearSelection = useCallback(() => {
+    setChecked(new Set());
+    setAllMatching(false);
+  }, []);
+  const closeBulk = useCallback(() => setBulk(null), []);
+
   const resetFilters = () => {
     setSearch("");
     setSource(ALL);
@@ -154,17 +191,28 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
     setAgent(ALL);
     setDateWindow(ALL);
     setPage(1);
+    clearSelection();
   };
 
-  /** Any filter change resets to page 1 — page 7 of a 2-page result is an empty table. */
+  /**
+   * Any filter change resets to page 1 — page 7 of a 2-page result is an empty table —
+   * and clears the selection, since rows ticked under the old filters are no longer the
+   * ones on screen and "all matching" now means something else.
+   */
   const withReset = (setter: (value: string) => void) => (value: string) => {
     setter(value);
     setPage(1);
+    clearSelection();
   };
 
-  const allOnPageChecked = rows.length > 0 && rows.every((lead) => checked.has(lead.id));
+  const allOnPageChecked =
+    rows.length > 0 && (allMatching || rows.every((lead) => checked.has(lead.id)));
 
   const toggleAll = () => {
+    if (allMatching) {
+      clearSelection();
+      return;
+    }
     const next = new Set(checked);
     if (allOnPageChecked) rows.forEach((lead) => next.delete(lead.id));
     else rows.forEach((lead) => next.add(lead.id));
@@ -172,11 +220,33 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
   };
 
   const toggleOne = (id: string) => {
-    const next = new Set(checked);
+    // Unticking one row of "all matching" falls back to the rows on this page, less that one.
+    const next = allMatching ? new Set(rows.map((lead) => lead.id)) : new Set(checked);
+    setAllMatching(false);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     setChecked(next);
   };
+
+  const selectedCount = allMatching ? total : checked.size;
+  // Seed rows belong to no workspace, so there is nothing to add them to.
+  const showSelectionBar = canAddToCampaign && result?.source === "api" && selectedCount > 0;
+  const leadsWord = (count: number) => (count === 1 ? "lead" : "leads");
+  const matchingWord = filtersActive ? "matching " : "";
+
+  const firstShown = (safePage - 1) * PAGE_SIZE + 1;
+  const lastShown = Math.min(safePage * PAGE_SIZE, total);
+  const footer =
+    loadError && rows.length === 0
+      ? "Leads could not be loaded"
+      : loading && !result
+        ? "Loading leads…"
+        : total === 0
+          ? filtersActive
+            ? "No leads match these filters"
+            : "No leads yet"
+          : `Showing ${firstShown.toLocaleString("en-IN")}–${lastShown.toLocaleString("en-IN")} ` +
+            `of ${total.toLocaleString("en-IN")} ${matchingWord}${leadsWord(total)}`;
 
   return (
     <div className="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_344px]">
@@ -185,7 +255,7 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
           <SearchInput
             value={search}
             onChange={withReset(setSearch)}
-            placeholder="Search by name, clinic, or phone number..."
+            placeholder="Search by lead / company name, city or phone number..."
           />
 
           <div className="mt-4 flex flex-wrap items-end gap-3">
@@ -268,6 +338,48 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
           </div>
         </div>
 
+        {showSelectionBar && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-100 bg-accent-blue/[0.05] px-4 py-2.5">
+            <p className="tabular text-[13px] font-medium text-brand-navy" aria-live="polite">
+              {allMatching
+                ? `All ${total.toLocaleString("en-IN")} ${matchingWord}${leadsWord(total)} selected`
+                : `${checked.size.toLocaleString("en-IN")} selected`}
+            </p>
+            {!allMatching && allOnPageChecked && total > checked.size && (
+              <button
+                type="button"
+                onClick={() => setAllMatching(true)}
+                className="text-[13px] font-semibold text-accent-blue hover:underline"
+              >
+                Select all {total.toLocaleString("en-IN")} {matchingWord}
+                {leadsWord(total)}
+              </button>
+            )}
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="h-8 rounded-btn px-3 text-[13px] font-medium text-brand-navy transition-colors hover:bg-slate-100"
+              >
+                Clear selection
+              </button>
+              <Button
+                size="sm"
+                onClick={() =>
+                  setBulk(
+                    allMatching
+                      ? { kind: "filter", query: filterQuery, total }
+                      : { kind: "ids", ids: Array.from(checked) },
+                  )
+                }
+              >
+                <ListPlus className="h-4 w-4" strokeWidth={2.2} />
+                Add to campaign
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="scrollbar-thin relative w-full overflow-x-auto">
           <table className="w-full min-w-[900px] border-collapse text-left">
             <thead>
@@ -277,11 +389,11 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
                     type="checkbox"
                     checked={allOnPageChecked}
                     onChange={toggleAll}
-                    aria-label="Select all leads on this page"
+                    aria-label={allMatching ? "Clear selection" : "Select all leads on this page"}
                     className="h-4 w-4 cursor-pointer rounded border-slate-300 text-accent-blue accent-[#237DF5]"
                   />
                 </Th>
-                <Th className="min-w-[158px]">Lead / Clinic</Th>
+                <Th className="min-w-[158px]">Lead / Company</Th>
                 <Th>Phone</Th>
                 <Th>City</Th>
                 <Th>Source</Th>
@@ -299,7 +411,7 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
                   key={lead.id}
                   lead={lead}
                   selected={lead.id === selectedId}
-                  checked={checked.has(lead.id)}
+                  checked={allMatching || checked.has(lead.id)}
                   onCheck={() => toggleOne(lead.id)}
                   onSelect={() => setSelectedId(lead.id)}
                 />
@@ -327,17 +439,15 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
             </div>
           )}
 
-          {loadError && rows.length === 0 && (
-            <div className="px-5 py-14 text-center">
+          {!loading && loadError && rows.length === 0 && (
+            <div role="alert" className="px-5 py-14 text-center">
               <p className="text-[13.5px] font-medium text-brand-navy">
                 Could not load leads.
               </p>
-              <p className="mt-1 text-[12.5px] text-slate-500">
-                The server did not respond. Check that the API is running.
-              </p>
+              <p className="mt-1 text-[12.5px] text-slate-500">{loadError}</p>
               <button
                 type="button"
-                onClick={() => setPage((current) => current)}
+                onClick={() => setReloadKey((key) => key + 1)}
                 className="mt-3 inline-flex h-9 items-center rounded-btn border border-slate-200 px-4 text-[13px] font-semibold text-accent-blue transition-colors hover:bg-slate-50"
               >
                 Try again
@@ -359,33 +469,45 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
                   Clear all filters
                 </button>
               ) : (
-                <Link
-                  href="/leads/import"
-                  className="mt-3 inline-flex h-9 items-center rounded-btn bg-accent-blue px-4 text-[13px] font-semibold text-white transition-colors hover:bg-[#1B6CD8]"
-                >
-                  Import your first leads
-                </Link>
+                <>
+                  <p className="mt-1 text-[12.5px] text-slate-500">
+                    Add a lead by hand, or import a CSV file of them.
+                  </p>
+                  <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+                    <LeadIntakeActions size="md" />
+                  </div>
+                </>
               )}
             </div>
           )}
         </div>
 
+        {/* Rows from an earlier load stay on screen; the failure must still be visible. */}
+        {!loading && loadError && rows.length > 0 && (
+          <div
+            role="alert"
+            className="flex flex-wrap items-center gap-3 border-t border-alert-red/20 bg-alert-red/[0.06] px-4 py-2 text-[12.5px] font-medium text-[#C93B3B]"
+          >
+            <span>Could not refresh the list: {loadError}</span>
+            <button
+              type="button"
+              onClick={() => setReloadKey((key) => key + 1)}
+              className="font-semibold text-accent-blue hover:underline"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
         {result?.source === "seed" && (
           <p className="border-t border-amber-200 bg-warning-amber/[0.08] px-4 py-2 text-[12px] font-medium text-[#B4761A]">
-            Showing sample data — the API is not reachable, so these rows are not from your
-            workspace.
+            Showing sample data (development only): the API is not running, so these rows are not
+            from any workspace.
           </p>
         )}
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-4 py-3">
-          <p className="tabular text-[12.5px] text-slate-500">
-            {total === 0
-              ? "No leads to show"
-              : `Showing ${(safePage - 1) * PAGE_SIZE + 1} to ${Math.min(
-                  safePage * PAGE_SIZE,
-                  total,
-                )} of ${total.toLocaleString("en-IN")} leads`}
-          </p>
+          <p className="tabular text-[12.5px] text-slate-500">{footer}</p>
           <Pagination page={safePage} totalPages={totalPages} onChange={setPage} />
         </div>
       </Card>
@@ -399,6 +521,10 @@ export function LeadsBrowser({ initialSearch = "" }: { initialSearch?: string })
             onClose={() => setSelectedId(null)}
           />
         </div>
+      )}
+
+      {bulk && (
+        <AddToCampaignDialog open onClose={closeBulk} onAdded={clearSelection} selection={bulk} />
       )}
     </div>
   );

@@ -58,6 +58,9 @@ jobs:
     env:
       # A throwaway database that exists only for this job; the tests truncate it freely.
       TEST_DATABASE_URL: postgresql://appsgain:appsgain@localhost:5433/appsgain_test?schema=public
+      # Two-factor setup refuses with 503 without a key (locally it comes from .env, which CI
+      # does not have). Not a secret: it only ever encrypts this job's throwaway rows.
+      CREDENTIALS_ENCRYPTION_KEY: ci-credentials-key-for-throwaway-test-data-only
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
