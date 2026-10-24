@@ -114,10 +114,26 @@ docker-compose.yml   Postgres (dev + test) and Redis
 | 2 — Design tokens, `components/ui`, `/style-guide` | Done |
 | 3 — Dashboard shell, navigation, layout | Done |
 | 4 — Leads: Prisma model, REST endpoints, CSV import, Leads list + detail | Done |
-| 5 — Find Leads (AI), Campaigns, AI Calling, Call History, Recordings, Settings | UI done, no API |
-| 6 — Transcripts, Sales Notes, Follow-ups, Analytics, Plans | UI done, no API |
-| 7 — Auth and onboarding screens, Appsgain brand lockup | UI done, no API |
-| 8–13 — Calling pipeline, follow-up automation, billing, compliance | Not started |
+| 5 — Campaigns, AI Calling, Call History, Recordings, Settings | Done against the API; calls run on sandbox providers (see below) |
+| 5 — Find Leads (AI) | Not started: a "coming soon" page, or a preview over sample data behind `NEXT_PUBLIC_FEATURE_FIND_LEADS` |
+| 6 — Transcripts, Sales Notes, Follow-ups, Analytics | Done against the API |
+| 6 — Plans | UI only: prices from `lib/mock-plans.ts`, no checkout |
+| 7 — Auth and onboarding screens, Appsgain brand lockup | Done, with 2FA and Google and Microsoft sign-in through Clerk |
+| 8–13 — Calling pipeline, follow-up automation, billing, compliance | Partly built; what is missing is listed below |
+
+### Not built yet
+
+- **Real calls.** Telephony, speech-to-text, text-to-speech and the LLM have sandbox
+  adapters only ([providers/sandbox](apps/api/src/providers/sandbox/sandbox.adapters.ts)),
+  so no number is dialled, and every endpoint in the AI service returns 501. Plivo is the
+  chosen telephony provider.
+- **Recording audio.** It is not stored, so `GET /api/recordings/:id/audio` returns 501.
+- **Payments.** No gateway, checkout, invoices or self-serve plan changes; credits are granted
+  from the operator console. Razorpay is the chosen gateway.
+- **DND/DLT.** Numbers are checked against the workspace's own suppression list, not the
+  national registry.
+- **Per-workspace logo and colours.** `branding_config` is not read from the API yet.
+- **Support impersonation.** Only the audit-log column (`via_impersonation`) exists.
 
 ### Screens
 
@@ -148,11 +164,11 @@ docker-compose.yml   Postgres (dev + test) and Redis
 | `/settings` | Profile, team, billing, integrations, call settings, notifications, security, workspace |
 | `/style-guide` | Design-system QA — every `components/ui` component (`next dev` only) |
 
-Every screen renders from `apps/web/lib/mock-*.ts`. Those shapes already match the
-responses the corresponding endpoints are specified to return (TRD §8), so wiring each
-one up is swapping an import rather than rewriting a component. `lib/leads-repository.ts`
-already prefers the live API when it is reachable and falls back to the seed set
-otherwise — it says which it used, in the console and on screen.
+Screens load from the API. `lib/leads-repository.ts`, `lib/dashboard-data.ts` and
+`lib/analytics-data.ts` fall back to the sample data in `apps/web/lib/mock-*.ts` when the
+API is unreachable; the leads repository says which it used, in the console and on screen.
+Two screens still render only sample data: Find Leads (`lib/mock-discovery.ts`) and Plans
+(`lib/mock-plans.ts`).
 
 ## Integrations
 
