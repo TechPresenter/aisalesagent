@@ -123,9 +123,10 @@ describe("Tenant isolation", () => {
       expect(await prisma.lead.findUnique({ where: { id: betaLeadId } })).not.toBeNull();
     });
 
-    it("ignores a tenantId smuggled into a create body", async () => {
-      // ValidationPipe's whitelist strips the unknown property; forbidNonWhitelisted
-      // turns it into an outright rejection. Either way the lead cannot land in beta.
+    it("refuses a tenantId smuggled into a create body", async () => {
+      // TenantGuard reads a tenantId from the body as well as the path and query, and
+      // refuses one naming another workspace before ValidationPipe would have rejected the
+      // unknown property. Either way the lead cannot land in beta.
       await request(app.getHttpServer())
         .post("/api/leads")
         .set(authed(alpha))
@@ -134,7 +135,7 @@ describe("Tenant isolation", () => {
           phone: "9876500003",
           tenantId: beta.tenantId,
         })
-        .expect(400);
+        .expect(403);
 
       const betaLeads = await prisma.lead.findMany({ where: { tenantId: beta.tenantId } });
       expect(betaLeads).toHaveLength(1);
@@ -326,10 +327,17 @@ describe("Tenant isolation", () => {
         .send({ subdomain: alpha.subdomain, email: alpha.ownerEmail, password: TEST_PASSWORD })
         .expect(200);
 
-      await request(app.getHttpServer())
-        .get(`/api/leads/${betaLeadId}`)
-        .set("Authorization", `Bearer ${login.body.accessToken}`)
-        .expect(404);
+      // SUPER_ADMIN holds no workspace permissions at all (ROLE_PERMISSIONS in
+      // @appsgain/shared), so PermissionGuard refuses before any row is looked up: the same
+      // answer for another tenant's lead as for one that does not exist, so it confirms
+      // nothing about either.
+      for (const id of [betaLeadId, "00000000-0000-4000-8000-000000000000"]) {
+        const refused = await request(app.getHttpServer())
+          .get(`/api/leads/${id}`)
+          .set("Authorization", `Bearer ${login.body.accessToken}`)
+          .expect(403);
+        expect(refused.body.message).toBe("Missing permission: leads.view");
+      }
     });
 
     it("is not rejected outright for naming another tenant, unlike a normal user", async () => {
@@ -368,8 +376,11 @@ describe("Tenant isolation", () => {
       const scoped = prisma.forTenant(alpha.tenantId);
       const leads = await scoped.lead.findMany({ where: { tenantId: beta.tenantId } });
 
-      // The injected filter is applied last and wins.
-      expect(leads).toHaveLength(0);
+      // The injected filter is applied last and wins, so asking for beta's leads returns
+      // alpha's own (the one from the test above) rather than nothing, and never beta's.
+      expect(leads).toHaveLength(1);
+      expect(leads.every((lead) => lead.tenantId === alpha.tenantId)).toBe(true);
+      expect(leads.map((lead) => lead.id)).not.toContain(betaLeadId);
     });
 
     it("returns null from findUnique for another tenant's row", async () => {
