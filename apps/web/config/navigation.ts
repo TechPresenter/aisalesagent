@@ -15,6 +15,7 @@ import {
   Users,
   type LucideIcon,
 } from "lucide-react";
+import { features } from "@/config/features";
 
 export interface NavItem {
   label: string;
@@ -22,11 +23,17 @@ export interface NavItem {
   icon: LucideIcon;
 }
 
-/** Build Plan Phase 3 fixes both the order and the labels of the sidebar. */
+/**
+ * Build Plan Phase 3 fixes both the order and the labels of the sidebar.
+ *
+ * Find Leads (AI) is listed only when its feature switch is on (config/features.ts). Off,
+ * the route still answers with a "coming soon" page, but nothing links to it: a menu entry
+ * that leads to sample data reads as a feature the product has.
+ */
 export const navItems: NavItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard },
   { label: "Leads", href: "/leads", icon: Users },
-  { label: "Find Leads (AI)", href: "/find-leads", icon: Search },
+  ...(features.findLeads ? [{ label: "Find Leads (AI)", href: "/find-leads", icon: Search }] : []),
   { label: "Campaigns", href: "/campaigns", icon: Megaphone },
   { label: "AI Calling", href: "/ai-calling", icon: PhoneCall },
   { label: "Call History", href: "/call-history", icon: History },

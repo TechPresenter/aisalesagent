@@ -85,17 +85,6 @@ export function RecordingsView() {
 
   const selected = rows.find((r) => r.id === selectedId);
 
-  async function download(recording: ApiRecording) {
-    try {
-      const { url } = await recordingsApi.signedUrl(recording.id);
-      window.open(url, "_blank", "noopener");
-    } catch (cause) {
-      setNotice(
-        cause instanceof ApiError ? cause.message : "Could not create a download link.",
-      );
-    }
-  }
-
   async function remove(recording: ApiRecording) {
     if (
       !window.confirm(
@@ -259,14 +248,15 @@ export function RecordingsView() {
                           <FileText className="h-3.5 w-3.5" strokeWidth={2.2} />
                         </Link>
                       )}
+                      {/* Disabled like Play, and for the same reason: the API answers a
+                          download link with 501 until recordings are kept in object
+                          storage, so an enabled button could only fail. */}
                       <button
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void download(recording);
-                        }}
+                        disabled
                         aria-label="Download recording"
-                        className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 text-accent-blue transition-colors hover:bg-slate-50"
+                        title="No object storage is connected, so the audio cannot be downloaded yet."
+                        className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md border border-slate-200 text-accent-blue opacity-50"
                       >
                         <Download className="h-3.5 w-3.5" strokeWidth={2.2} />
                       </button>

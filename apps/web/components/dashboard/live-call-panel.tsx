@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { Headphones, Loader2, PhoneOff } from "lucide-react";
+import { Loader2, PhoneOff } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import type { ActionNotice } from "@/lib/lead-actions";
@@ -17,13 +17,15 @@ const BARS = [
 ];
 
 /**
- * Feature List §5 — the Live Call detail panel: waveform, agent identity, Listen Live
- * and Force End Call. Brand Guidelines §7: the human-oversight controls are always
- * visible alongside the AI action, never behind a menu.
+ * Feature List §5 — the Live Call detail panel: waveform, agent identity and Force End
+ * Call. Brand Guidelines §7: the human-oversight controls are always visible alongside
+ * the AI action, never behind a menu.
  *
  * The waveform is decorative until Phase 6 streams real audio, so it is aria-hidden and
  * pauses whenever the caller is not actually talking. Listen Live needs that same audio
- * stream, so until it exists the button says so instead of doing nothing.
+ * stream (telephony with media streaming), so it is not offered at all until the stream
+ * exists: a permanently disabled button reads as a feature the product has and has
+ * switched off. It returns beside End Call, as the second of a pair, when it works.
  *
  * The elapsed time is read straight off the call the parent passes down. A second timer
  * here would race the table's and the two clocks would drift apart on screen.
@@ -118,9 +120,10 @@ export function LiveCallPanel({
 
       {notice && <NoticeLine notice={notice} />}
 
-      <div className="mt-5 grid grid-cols-2 gap-2.5">
+      <div className="mt-5">
         <Button
           variant="danger"
+          className="w-full"
           onClick={() => onEnd?.(call)}
           disabled={!onEnd || ending}
           title={onEnd ? undefined : "Start the API to control calls."}
@@ -131,10 +134,6 @@ export function LiveCallPanel({
             <PhoneOff className="h-4 w-4" strokeWidth={2} />
           )}
           End Call
-        </Button>
-        <Button variant="secondary" disabled title="Live audio streaming is not available yet.">
-          <Headphones className="h-4 w-4" strokeWidth={2} />
-          Listen Live
         </Button>
       </div>
     </Card>

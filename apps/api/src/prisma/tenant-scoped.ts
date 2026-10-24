@@ -17,6 +17,8 @@ export const TENANT_SCOPED_MODELS = new Set([
   "Tag",
   "LeadTag",
   "LeadActivity",
+  "Suppression",
+  "ImportBatch",
   // Campaigns
   "Campaign",
   "CampaignLead",

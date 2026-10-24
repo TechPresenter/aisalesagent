@@ -1,7 +1,10 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
+import { APP_FILTER } from "@nestjs/core";
 import { join } from "node:path";
+import { AdminModule } from "./admin/admin.module";
 import { AuthModule } from "./auth/auth.module";
+import { AllExceptionsFilter } from "./common/all-exceptions.filter";
 import { HealthController } from "./health/health.controller";
 import { CampaignsModule } from "./campaigns/campaigns.module";
 import { CreditsModule } from "./credits/credits.module";
@@ -61,8 +64,10 @@ import { validateEnv } from "./config/env.validation";
     AgentsModule,
     IntegrationsModule,
     ApiKeysModule,
+    AdminModule,
   ],
   controllers: [HealthController],
+  providers: [{ provide: APP_FILTER, useClass: AllExceptionsFilter }],
 })
 export class AppModule {}
 

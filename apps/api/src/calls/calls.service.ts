@@ -8,6 +8,7 @@ import { callData, leadData } from "../integrations/events/payloads";
 import { NotificationsService } from "../notifications/notifications.service";
 import { ProvidersService } from "../providers/providers.service";
 import { isSandboxProvider } from "../providers/sandbox/sandbox.adapters";
+import { suppressionCandidates } from "../leads/leads.dedupe";
 import {
   BLOCK_REASON_TEXT,
   evaluateCallGates,
@@ -496,6 +497,19 @@ export class CallsService {
 
     const wallet = await this.credits.wallet();
 
+    // The suppression list replaced settings.blockedNumbers. Suppressed numbers are stored
+    // normalised exactly as lead numbers are, so for an Indian mobile this is one indexed
+    // equality; a landline or an international number also matches by suffix, as the old
+    // list did (see suppressionCandidates). The gate's list input carries only the match,
+    // if there is one.
+    const { equals, endingWith } = suppressionCandidates(lead.phone);
+    const suppressed = await this.db.suppression.findFirst({
+      where: endingWith
+        ? { OR: [{ phone: { in: equals } }, { phone: { endsWith: endingWith } }] }
+        : { phone: { in: equals } },
+      select: { phone: true },
+    });
+
     return evaluateCallGates({
       // A manual call is not governed by a campaign's status; treating an absent campaign
       // as ACTIVE lets the dialer and the manual dialer share one gate function.
@@ -522,7 +536,7 @@ export class CallsService {
       dailyCallLimit: campaign?.dailyCallLimit ?? settings.maxCallsPerDay,
       creditBalance: wallet.balance,
       creditCost: 1,
-      blockedNumbers: settings.blockedNumbers,
+      blockedNumbers: suppressed ? [suppressed.phone] : [],
       allowedCountries: settings.allowedCountries,
       dncEnabled: settings.dncEnabled,
     });

@@ -141,9 +141,15 @@ export class UpdateCallSettingsDto {
   @IsBoolean()
   consentRequired?: boolean;
 
+  /**
+   * The numbers blocked on this screen, replacing the whole set. Stored on the suppression
+   * list (source SETTINGS) rather than this row, so the bound is a sanity limit on one
+   * request, not a cap on the list. Leads' do-not-call marks and people's opt-outs are on
+   * the same list but never in this set, so leaving them out does not remove them.
+   */
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(1000)
+  @ArrayMaxSize(10_000)
   @IsString({ each: true })
   @MaxLength(32, { each: true })
   blockedNumbers?: string[];

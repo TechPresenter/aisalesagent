@@ -15,6 +15,7 @@ import { RequirePermissions } from "../auth/decorators";
 import {
   AddCampaignLeadsDto,
   CreateCampaignDto,
+  ListCampaignLeadsDto,
   ListCampaignsDto,
   UpdateCampaignDto,
 } from "./dto/campaign.dto";
@@ -22,6 +23,7 @@ import {
   CampaignsService,
   type CampaignOverview,
   type CampaignWithStats,
+  type PaginatedCampaignLeads,
   type PaginatedCampaigns,
 } from "./campaigns.service";
 
@@ -114,6 +116,20 @@ export class CampaignsController {
   @HttpCode(HttpStatus.CREATED)
   duplicate(@Param("id", ParseUUIDPipe) id: string): Promise<CampaignWithStats> {
     return this.campaigns.duplicate(id);
+  }
+
+  /**
+   * The leads in a campaign and where the dialer is with each. `leads.view` as well as
+   * `campaigns.view`: the rows are names and phone numbers, which a role that cannot open
+   * the Leads screen should not read here either.
+   */
+  @Get(":id/leads")
+  @RequirePermissions("campaigns.view", "leads.view")
+  listLeads(
+    @Param("id", ParseUUIDPipe) id: string,
+    @Query() query: ListCampaignLeadsDto,
+  ): Promise<PaginatedCampaignLeads> {
+    return this.campaigns.listLeads(id, query);
   }
 
   @Post(":id/leads")

@@ -60,6 +60,7 @@ export const PERMISSIONS = [
 
   "credits.view",
   "credits.manage",
+  "credits.adjust",
 
   "team.view",
   "team.manage",
@@ -79,6 +80,28 @@ export const PERMISSIONS = [
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
+
+/**
+ * Permissions that exist so a route can name them, but that no workspace member can ever
+ * hold: not a system role, not a custom role, not an API key.
+ *
+ * `credits.adjust` is minting credits out of nothing. Held by an OWNER it let any
+ * workspace give itself as many as it liked, so it belongs to the platform operator, who
+ * reaches it through the audited operator console (POST /admin/tenants/:tenantId/credits)
+ * rather than through a grant inside the workspace. Keeping it in the catalogue rather
+ * than deleting the route means a request for it is refused by name, with a 403 that says
+ * what is missing, instead of quietly becoming a 404.
+ */
+export const PLATFORM_PERMISSIONS = ["credits.adjust"] as const satisfies readonly Permission[];
+
+export function isPlatformPermission(permission: string): boolean {
+  return (PLATFORM_PERMISSIONS as readonly string[]).includes(permission);
+}
+
+/** Everything a workspace role may hold — what the role editor offers, and what OWNER has. */
+export const WORKSPACE_PERMISSIONS: readonly Permission[] = PERMISSIONS.filter(
+  (permission) => !isPlatformPermission(permission),
+);
 
 /** Grouping for the role editor, so the UI does not have to parse the key prefix. */
 export const PERMISSION_CATEGORY: Record<Permission, string> = {
@@ -129,6 +152,7 @@ export const PERMISSION_CATEGORY: Record<Permission, string> = {
 
   "credits.view": "Credits",
   "credits.manage": "Credits",
+  "credits.adjust": "Credits",
 
   "team.view": "Team",
   "team.manage": "Team",
@@ -222,8 +246,13 @@ const ADMIN_GRANTS: Permission[] = [
   "audit.view",
 ];
 
-/** The owner holds everything, including the two that spend money. */
-const OWNER_GRANTS: Permission[] = [...PERMISSIONS];
+/**
+ * The owner holds every workspace permission, including the two that spend money
+ * (`billing.manage`, `credits.manage`). `credits.manage` is the read-only half of
+ * the ledger: reconciling the balance against its history. Adding credits is
+ * `credits.adjust`, which is a platform permission and is not the owner's to hold.
+ */
+const OWNER_GRANTS: Permission[] = [...WORKSPACE_PERMISSIONS];
 
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   SUPER_ADMIN: [],
@@ -247,7 +276,9 @@ export function hasPermission(
   customPermissions?: readonly string[],
 ): boolean {
   if (customPermissions) {
-    return customPermissions.includes(permission);
+    // A custom role is built from the catalogue, so it could otherwise name a platform
+    // permission that no system role holds. Refused here, where every check passes.
+    return !isPlatformPermission(permission) && customPermissions.includes(permission);
   }
   return ROLE_PERMISSIONS[role].includes(permission);
 }
@@ -257,7 +288,7 @@ export function permissionsFor(
   customPermissions?: readonly string[],
 ): readonly Permission[] {
   if (customPermissions) {
-    return PERMISSIONS.filter((p) => customPermissions.includes(p));
+    return WORKSPACE_PERMISSIONS.filter((p) => customPermissions.includes(p));
   }
   return ROLE_PERMISSIONS[role];
 }

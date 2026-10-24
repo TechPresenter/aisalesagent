@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
-import { Plus, Upload } from "lucide-react";
+import Link from "next/link";
+import { Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { LeadIntakeActions } from "@/components/leads/add-lead-dialog";
 import { LeadsBrowser } from "@/components/leads/leads-browser";
 import { LeadStatsStrip } from "@/components/leads/lead-stats-strip";
+import { features } from "@/config/features";
 
 export const metadata: Metadata = {
   title: "Leads · AI Sales Agent",
@@ -11,6 +14,10 @@ export const metadata: Metadata = {
 /**
  * Feature List §2 — Leads Management. `?search=` comes from the header's search box; the
  * browser is keyed on it so a second search from the header replaces the first.
+ *
+ * Add Lead and Import are the primary actions because they are how a workspace's own
+ * leads get in. Find Leads (AI) sits beside them as a quieter link, when its feature
+ * switch is on (config/features.ts).
  */
 export default function LeadsPage({ searchParams }: { searchParams: { search?: string } }) {
   const search = searchParams.search ?? "";
@@ -28,18 +35,15 @@ export default function LeadsPage({ searchParams }: { searchParams: { search?: s
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-3">
-          <Button variant="secondary" size="lg" asChild>
-            <a href="/leads/import">
-              <Upload className="h-4 w-4" strokeWidth={2.2} />
-              Import Leads
-            </a>
-          </Button>
-          <Button size="lg" asChild>
-            <a href="/find-leads">
-              <Plus className="h-4 w-4" strokeWidth={2.4} />
-              Find Leads (AI)
-            </a>
-          </Button>
+          {features.findLeads && (
+            <Button variant="ghost" size="lg" asChild>
+              <Link href="/find-leads">
+                <Sparkles className="h-4 w-4" strokeWidth={2.2} />
+                Find Leads (AI)
+              </Link>
+            </Button>
+          )}
+          <LeadIntakeActions />
         </div>
       </div>
 

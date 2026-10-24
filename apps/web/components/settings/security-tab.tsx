@@ -103,7 +103,8 @@ export function SecurityTab({ onChangePassword }: { onChangePassword: () => void
         <CardTitle>Password</CardTitle>
         <p className="mt-1 text-[13px] leading-relaxed text-slate-500">
           Changing your password signs you out of every device, including this one, and asks
-          you to sign in again.
+          you to sign in again. If you signed up with Google or Microsoft, this sets your
+          first password instead.
         </p>
         <div className="mt-4">
           <Button variant="secondary" className="h-11" onClick={onChangePassword}>
@@ -112,7 +113,7 @@ export function SecurityTab({ onChangePassword }: { onChangePassword: () => void
         </div>
       </Card>
 
-      <AccountSecurityCards />
+      <AccountSecurityCards onSetPassword={onChangePassword} />
 
       <Card className="p-5">
         <CardHeader className="p-0">

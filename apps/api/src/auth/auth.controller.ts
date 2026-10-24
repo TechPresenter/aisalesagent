@@ -11,13 +11,20 @@ import {
   Req,
 } from "@nestjs/common";
 import type { Request } from "express";
-import type { AuthTokens, LoginResponse, LoginResult } from "@appsgain/shared";
+import type {
+  AuthTokens,
+  LoginResponse,
+  LoginResult,
+  SsoSignInResult,
+  SsoSignedIn,
+} from "@appsgain/shared";
 import { AccountRecoveryService } from "./account-recovery.service";
-import { AuthService, type SessionSummary } from "./auth.service";
-import { CurrentUser, Public } from "./decorators";
+import { AuthService, sessionContext, type SessionSummary } from "./auth.service";
+import { AllowWhenSuspended, CurrentUser, Public } from "./decorators";
 import {
   AcceptInvitationDto,
   ChangePasswordDto,
+  ClerkSignInDto,
   CurrentPasswordDto,
   ForgotPasswordDto,
   LoginDto,
@@ -25,23 +32,35 @@ import {
   PasswordAndCodeDto,
   RefreshDto,
   ResetPasswordDto,
+  SetPasswordDto,
+  SsoSelectDto,
   TokenDto,
   TwoFactorCodeDto,
   TwoFactorSignInDto,
   VerifyEmailDto,
 } from "./dto/auth.dto";
 import { InvitationAcceptService } from "./invitation-accept.service";
+import { SsoService } from "./sso.service";
 import { TwoFactorService } from "./two-factor.service";
 import type { TenantContext } from "../prisma/tenant-prisma.provider";
 
-/** TRD §8 — /auth. SSO (`POST /auth/sso`) is Enterprise-tier and not part of this phase. */
+/**
+ * TRD §8 — /auth. Enterprise SSO (SAML, `POST /auth/sso`) is not part of this phase;
+ * signing in with Google or Microsoft, brokered by Clerk, is — under `/auth/sso/clerk`.
+ *
+ * Every route here stays open to a suspended workspace: what is not public is a person
+ * looking after their own account (password, sessions, two-factor, email), which matters
+ * most exactly when something is wrong with the workspace.
+ */
 @Controller("auth")
+@AllowWhenSuspended()
 export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly recovery: AccountRecoveryService,
     private readonly twoFactor: TwoFactorService,
     private readonly invitations: InvitationAcceptService,
+    private readonly sso: SsoService,
   ) {}
 
   /** A session, or — when the account has 2FA — a challenge for `login/2fa`. */
@@ -57,6 +76,28 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   loginTwoFactor(@Body() dto: TwoFactorSignInDto, @Req() request: Request): Promise<LoginResponse> {
     return this.auth.completeTwoFactorSignIn(dto, sessionContext(request));
+  }
+
+  // ── Google and Microsoft sign-in (Clerk) ──────────────────────────────────────────
+
+  /**
+   * A Clerk session token from the Google or Microsoft redirect. Answers as `login` does
+   * when the address matches one account, and otherwise with a workspace to choose or a
+   * token to sign up with. 503 while CLERK_SECRET_KEY is not set.
+   */
+  @Public()
+  @Post("sso/clerk")
+  @HttpCode(HttpStatus.OK)
+  signInWithClerk(@Body() dto: ClerkSignInDto, @Req() request: Request): Promise<SsoSignInResult> {
+    return this.sso.signInWithClerk(dto, sessionContext(request));
+  }
+
+  /** The workspace picked after `sso/clerk` answered `choose-workspace`. */
+  @Public()
+  @Post("sso/select")
+  @HttpCode(HttpStatus.OK)
+  selectSsoWorkspace(@Body() dto: SsoSelectDto, @Req() request: Request): Promise<SsoSignedIn> {
+    return this.sso.selectWorkspace(dto, sessionContext(request));
   }
 
   // ── account recovery (signed out) ─────────────────────────────────────────────────
@@ -109,14 +150,17 @@ export class AuthController {
 
   // ── the signed-in account's own security ──────────────────────────────────────────
 
-  /** Settings → Security: email verification, 2FA, and whether email can be sent. */
+  /**
+   * Settings → Security: email verification, whether the account has a password yet, 2FA,
+   * and whether email can be sent.
+   */
   @Get("security")
   async security(@CurrentUser() user: TenantContext) {
-    const [emailVerified, twoFactor] = await Promise.all([
-      this.recovery.isEmailVerified(user.userId),
+    const [{ emailVerified, hasPassword }, twoFactor] = await Promise.all([
+      this.recovery.credentialState(user.userId),
       this.twoFactor.status(user),
     ]);
-    return { emailVerified, twoFactor, mail: this.recovery.mailStatus() };
+    return { emailVerified, hasPassword, twoFactor, mail: this.recovery.mailStatus() };
   }
 
   @Post("verify-email/send")
@@ -189,6 +233,17 @@ export class AuthController {
     await this.auth.changePassword(user.userId, dto.currentPassword, dto.newPassword);
   }
 
+  /**
+   * The first password for an account that signed up with Google or Microsoft, which has
+   * no current password to give `change-password`. Refused once the account has one, and
+   * unless the caller signed in within the last half hour.
+   */
+  @Post("password/set")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async setPassword(@Body() dto: SetPasswordDto, @CurrentUser() user: TenantContext): Promise<void> {
+    await this.auth.setFirstPassword(user.userId, dto.newPassword);
+  }
+
   /** Echoes back what the token resolved to — useful for debugging a tenant mix-up. */
   @Get("me")
   me(@CurrentUser() user: TenantContext): TenantContext {
@@ -217,16 +272,4 @@ export class AuthController {
   async revokeAllSessions(@CurrentUser() user: TenantContext): Promise<void> {
     await this.auth.revokeAllSessions(user.userId);
   }
-}
-
-/**
- * What a session row records about where it was created. `request.ip` is the socket
- * address unless Express is told to trust a proxy — recorded as it comes rather than
- * guessed from headers a client can forge.
- */
-function sessionContext(request: Request) {
-  return {
-    userAgent: request.headers["user-agent"] ?? null,
-    ipAddress: request.ip ?? null,
-  };
 }

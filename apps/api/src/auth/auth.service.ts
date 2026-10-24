@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -7,8 +8,9 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import * as argon2 from "argon2";
+import type { Request } from "express";
 import type { User } from "@prisma/client";
 import type {
   AuthTokens,
@@ -18,6 +20,7 @@ import type {
   LoginResult,
   Role,
   SessionUser,
+  TwoFactorChallenge,
 } from "@appsgain/shared";
 import { securityNoticeMail } from "../mail/mail-templates";
 import { MailService } from "../mail/mail.service";
@@ -31,6 +34,8 @@ const MAX_FAILED_SIGN_INS = 5;
 const LOCKOUT_MS = 15 * 60_000;
 /** How long a sign-in that passed its password waits for the 2FA code. */
 const TWO_FACTOR_CHALLENGE_MS = 5 * 60_000;
+/** How recent a sign-in must be for an account with no password to set its first one. */
+const FIRST_PASSWORD_SIGN_IN_MS = 30 * 60_000;
 
 /**
  * Where a session was created. Recorded so Settings → Security can list "this browser,
@@ -39,6 +44,18 @@ const TWO_FACTOR_CHALLENGE_MS = 5 * 60_000;
 export interface SessionContext {
   userAgent?: string | null;
   ipAddress?: string | null;
+}
+
+/**
+ * What a session row records about where it was created. `request.ip` is the socket
+ * address unless Express is told to trust a proxy — recorded as it comes rather than
+ * guessed from headers a client can forge.
+ */
+export function sessionContext(request: Request): SessionContext {
+  return {
+    userAgent: request.headers["user-agent"] ?? null,
+    ipAddress: request.ip ?? null,
+  };
 }
 
 /** One live session, as Settings lists it. */
@@ -69,6 +86,16 @@ export class AuthService {
   static hashPassword(plaintext: string): Promise<string> {
     // argon2id: memory-hard, so a leaked table is expensive to attack with GPUs.
     return argon2.hash(plaintext, { type: argon2.argon2id });
+  }
+
+  /**
+   * A real digest of a random secret nobody is ever told. The column needs a password and
+   * this is one, but no one can sign in with it — for an account that signs in with
+   * Google or Microsoft until its owner sets a password (setFirstPassword, or "forgot
+   * password"). Whoever stores it also sets `hasPassword` to false.
+   */
+  static unusablePasswordHash(): Promise<string> {
+    return AuthService.hashPassword(randomBytes(32).toString("base64url"));
   }
 
   /**
@@ -115,23 +142,31 @@ export class AuthService {
       throw new UnauthorizedException("This workspace is no longer active");
     }
 
-    // The password was right, but no session exists until the second factor is too. The
-    // challenge is signed and short-lived, and bound to the current password hash so a
-    // password reset in the meantime voids it.
+    // The password was right, but no session exists until the second factor is too.
     if (await this.twoFactor.isEnabled(user.id)) {
-      return {
-        twoFactorRequired: true,
-        challengeToken: signPurposeToken(
-          this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
-          "login-2fa",
-          { u: user.id, t: user.tenantId, f: passwordFingerprint(user.passwordHash) },
-          TWO_FACTOR_CHALLENGE_MS,
-        ),
-        expiresIn: TWO_FACTOR_CHALLENGE_MS / 1000,
-      };
+      return this.twoFactorChallenge(user);
     }
 
     return this.completeSignIn(user, tenant.name, context);
+  }
+
+  /**
+   * What a sign-in that proved the first factor gets when the account has 2FA, however it
+   * proved it — a password here, Google or Microsoft in SsoService. The challenge is
+   * signed and short-lived, and bound to the current password hash so a password reset in
+   * the meantime voids it.
+   */
+  twoFactorChallenge(user: Pick<User, "id" | "tenantId" | "passwordHash">): TwoFactorChallenge {
+    return {
+      twoFactorRequired: true,
+      challengeToken: signPurposeToken(
+        this.config.getOrThrow<string>("JWT_ACCESS_SECRET"),
+        "login-2fa",
+        { u: user.id, t: user.tenantId, f: passwordFingerprint(user.passwordHash) },
+        TWO_FACTOR_CHALLENGE_MS,
+      ),
+      expiresIn: TWO_FACTOR_CHALLENGE_MS / 1000,
+    };
   }
 
   /**
@@ -359,6 +394,14 @@ export class AuthService {
       throw new UnauthorizedException("This account is not active");
     }
 
+    // There is no current password to know. Said plainly rather than as "not correct",
+    // which would send the person hunting for a password they were never given.
+    if (!user.hasPassword) {
+      throw new BadRequestException(
+        "Your account signs in with Google or Microsoft and has no password yet. Set one instead.",
+      );
+    }
+
     if (!(await argon2.verify(user.passwordHash, currentPassword))) {
       throw new UnauthorizedException("Your current password is not correct");
     }
@@ -381,6 +424,58 @@ export class AuthService {
         name: user.name,
         event: "Your password was changed",
         detail: "The password for your Appsgain account was changed, and every device was signed out.",
+      }),
+    });
+  }
+
+  /**
+   * A first password, for an account that has none: one that signed up with Google or
+   * Microsoft, or was taken back from whoever created it without confirming the address.
+   * Such an account cannot use changePassword, which asks for a current password it was
+   * never given — and without a password it could not turn on two-factor authentication
+   * either, since that asks for one too.
+   *
+   * With no current password to ask for, the sign-in itself is the re-authentication: it
+   * must be recent. A session token picked up from an unlocked machine hours later is not
+   * enough to give the account a password its owner does not know. An account that
+   * already has a password is refused outright; that is changePassword's job.
+   *
+   * Sessions are left alone — nobody could have known a password that did not exist — and
+   * the address on the account is told, as it is for every password change.
+   */
+  async setFirstPassword(userId: string, newPassword: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user || user.status !== "ACTIVE") {
+      throw new UnauthorizedException("This account is not active");
+    }
+    if (user.hasPassword) {
+      throw new ConflictException(
+        "Your account already has a password. Change it instead, which asks for the current one.",
+      );
+    }
+    if (!user.lastLoginAt || Date.now() - user.lastLoginAt.getTime() > FIRST_PASSWORD_SIGN_IN_MS) {
+      throw new UnauthorizedException(
+        "For your security, sign out and sign in again with Google or Microsoft, then set your password within 30 minutes.",
+      );
+    }
+
+    // Conditional, so two requests racing cannot both set one.
+    const updated = await this.prisma.user.updateMany({
+      where: { id: user.id, hasPassword: false },
+      data: { passwordHash: await AuthService.hashPassword(newPassword), hasPassword: true },
+    });
+    if (updated.count === 0) {
+      throw new ConflictException("Your account already has a password.");
+    }
+    this.logger.log(`First password set for user ${user.id}`);
+
+    void this.mail.send({
+      to: user.email,
+      ...securityNoticeMail({
+        name: user.name,
+        event: "A password was set for your account",
+        detail:
+          "A password was added to your Appsgain account, which until now signed in only with Google or Microsoft. You can now also sign in with your email and that password.",
       }),
     });
   }

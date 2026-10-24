@@ -149,6 +149,28 @@ export function LeadDetailScreen({ id }: { id: string }) {
           }
         },
         loadTranscript: (transcriptId) => transcriptsApi.segments(transcriptId),
+        // The API puts a marked number on the do-not-call list, and refuses to clear one
+        // the person opted out of themselves; its reason is shown as the notice.
+        //
+        // Resolves only once the lead has been reloaded, unlike the other actions: the
+        // switch holds its new position until this settles, and the reload is what brings
+        // the saved value back to it. Resolving on the save alone flicked it back to the old
+        // position, clickable, for as long as the reload took.
+        onDoNotCallChange: async (doNotCall) => {
+          try {
+            await leadsApi.update(lead.id, { doNotCall });
+          } catch (cause) {
+            fail(cause, "Could not change do-not-call.");
+            throw cause;
+          }
+          setNotice({
+            tone: "ok",
+            text: doNotCall
+              ? `${lead.name} is marked do-not-call and will not be dialled.`
+              : `${lead.name} can be called again.`,
+          });
+          await load();
+        },
       }
     : undefined;
 

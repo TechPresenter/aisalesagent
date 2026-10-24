@@ -1,6 +1,15 @@
 import { escapeHtml } from "../integrations/vendors/email";
 
+/**
+ * Which of the platform's emails a message is. Logs and error reports name a message by
+ * this rather than by its subject, because a subject can carry the secret itself — "123456
+ * is your Appsgain verification code" — and a log line is read by far more people than
+ * the email was meant for.
+ */
+export type MailKind = "reset" | "verification" | "invitation" | "security-notice";
+
 export interface MailContent {
+  kind: MailKind;
   subject: string;
   text: string;
   html: string;
@@ -52,6 +61,7 @@ export function passwordResetMail(input: {
   const footnote =
     "If you did not ask to reset your password, ignore this email — your password stays as it is.";
   return {
+    kind: "reset",
     subject: "Reset your Appsgain password",
     text:
       `Hi ${input.name},\n\nSomeone asked to reset the password for your account in the ${input.workspace} workspace. ` +
@@ -71,6 +81,7 @@ export function passwordResetMail(input: {
 export function verificationCodeMail(input: { name: string; code: string; minutes: number }): MailContent {
   const footnote = "If you did not create an Appsgain account, you can ignore this email.";
   return {
+    kind: "verification",
     subject: `${input.code} is your Appsgain verification code`,
     text:
       `Hi ${input.name},\n\nYour verification code is ${input.code}. It expires in ${input.minutes} minutes.\n\n${footnote}`,
@@ -94,6 +105,7 @@ export function invitationMail(input: {
   const role = input.role.charAt(0) + input.role.slice(1).toLowerCase();
   const footnote = `If you were not expecting this, ignore it — the invitation expires in ${input.days} days.`;
   return {
+    kind: "invitation",
     subject: `Join ${input.workspace} on Appsgain`,
     text:
       `${who} to join ${input.workspace} on Appsgain as ${role}.\n\nAccept the invitation:\n\n${input.link}\n\n${footnote}`,
@@ -110,6 +122,7 @@ export function securityNoticeMail(input: { name: string; event: string; detail:
   const footnote =
     "If this was not you, reset your password straight away and tell your workspace owner.";
   return {
+    kind: "security-notice",
     subject: `Security notice: ${input.event}`,
     text: `Hi ${input.name},\n\n${input.detail}\n\n${footnote}`,
     html: render({

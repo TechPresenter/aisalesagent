@@ -102,6 +102,114 @@ export interface TwoFactorChallenge {
 
 export type LoginResult = LoginResponse | TwoFactorChallenge;
 
+// ── Google and Microsoft sign-in (Clerk) ────────────────────────────────────────────
+
+/**
+ * `POST /auth/sso/clerk` — the Clerk session token the browser holds after the Google or
+ * Microsoft redirect. Clerk only vouches for the email address; which Appsgain account
+ * that address opens is decided here. `subdomain` is the workspace the person was signing
+ * in to, when the page knows it.
+ */
+export interface ClerkSignInRequest {
+  token: string;
+  subdomain?: string;
+}
+
+/** `POST /auth/sso/select` — the workspace picked from a `choose-workspace` answer. */
+export interface SsoSelectRequest {
+  selectionToken: string;
+  subdomain: string;
+}
+
+/**
+ * A sign-in through Google or Microsoft that found the account: the same session or 2FA
+ * challenge `POST /auth/login` returns, so the challenge goes to `POST /auth/login/2fa`.
+ *
+ * `passwordCleared` is set when the person has just taken over an account whose email had
+ * never been confirmed (one a `choose-workspace` answer flagged `unconfirmed`). Whoever
+ * created it may not have been the address's owner, so the password, the two-factor
+ * enrolment and every session they set up are gone, and the answer is always a session;
+ * the page should say so.
+ */
+export type SsoSignedIn = LoginResult & { passwordCleared?: true };
+
+/**
+ * The address is known here, just not as an account it can sign in to: turned off in a
+ * workspace, or invited to one and not yet joined. Only ever told to the person who has
+ * just proved they own the address.
+ */
+export interface SsoKnownAddress {
+  reason: "disabled" | "invited";
+  /** The workspace's display name. */
+  workspace: string;
+}
+
+/**
+ * What creating a workspace for the address needs: `signupToken` stands in for the
+ * password on `POST /workspace` (as `ssoToken`), for the email it was issued for.
+ */
+export interface SsoSignupOffer {
+  signupToken: string;
+  email: string;
+  /** The name on the Google or Microsoft account, to prefill the form. */
+  name: string | null;
+  /** Seconds the signup token stays valid. */
+  expiresIn: number;
+  /** Set when the sign-up page should say where else the address is known. */
+  known?: SsoKnownAddress;
+}
+
+/** No account uses this address yet: a workspace can be created for it. */
+export interface SsoSignupRequired extends SsoSignupOffer {
+  status: "signup-required";
+}
+
+/**
+ * An account whose email was never confirmed. Anyone can sign up with someone else's
+ * address, so whoever set it up may not be the person now proving they own it. The counts
+ * are what that creator may still control in the workspace, shown before the pick so the
+ * owner can tell whether it is theirs; picking it takes the account over.
+ */
+export interface SsoUnconfirmedAccount {
+  /** ISO time the account was created. */
+  createdAt: string;
+  /** Other people who can sign in to the workspace. */
+  otherMembers: number;
+  /** Invitations to join it that can still be accepted. */
+  pendingInvitations: number;
+  /** API keys that still work. */
+  apiKeys: number;
+  /** Webhooks switched on. */
+  webhooks: number;
+}
+
+export interface SsoWorkspaceOption {
+  subdomain: string;
+  name: string;
+  /** Present when the account in this workspace never confirmed its email. */
+  unconfirmed?: SsoUnconfirmedAccount;
+}
+
+/**
+ * The address has accounts in more than one workspace, none was named (or the one named
+ * is not among them), or the only match is an account that never confirmed its email.
+ * Send the pick back with `selectionToken` to `POST /auth/sso/select`.
+ */
+export interface SsoWorkspaceChoice {
+  status: "choose-workspace";
+  selectionToken: string;
+  workspaces: SsoWorkspaceOption[];
+  /** Seconds the selection token stays valid. */
+  expiresIn: number;
+  /**
+   * Present when every workspace listed is `unconfirmed`: none of them may be the
+   * person's own, so they may create a workspace instead, as after `signup-required`.
+   */
+  signup?: SsoSignupOffer;
+}
+
+export type SsoSignInResult = SsoSignedIn | SsoSignupRequired | SsoWorkspaceChoice;
+
 export interface RefreshRequest {
   refreshToken: string;
 }

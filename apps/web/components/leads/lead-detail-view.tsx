@@ -66,6 +66,12 @@ export interface LeadDetailActions {
   /** Persists the tag list; rejects if the save failed, so the card can put it back. */
   onTagsChange: (tags: string[]) => Promise<void>;
   loadTranscript: (transcriptId: string) => Promise<TranscriptSegment[]>;
+  /**
+   * Sets or clears the lead's do-not-call flag; rejects if the save failed. Optional
+   * because it needs an API that accepts the flag on `PATCH /leads/:id` — without it the
+   * Overview shows the flag read-only rather than offering a switch that cannot save.
+   */
+  onDoNotCallChange?: (doNotCall: boolean) => Promise<void>;
 }
 
 const NEEDS_API = "Start the API to act on this lead.";
@@ -195,6 +201,7 @@ export function LeadDetailView({
               <OverviewTab
                 lead={lead}
                 onEdit={actions?.onEdit}
+                onDoNotCallChange={actions?.onDoNotCallChange}
                 onOpenTranscripts={() => setTab("Transcripts")}
               />
             )}
@@ -233,6 +240,7 @@ function LeadHeroCard({ lead, actions }: { lead: LeadDetail; actions?: LeadDetai
             <div className="flex flex-wrap items-center gap-2.5">
               <h2 className="text-[20px] font-bold tracking-tight text-brand-navy">{lead.name}</h2>
               <LeadStatusBadge status={lead.status} />
+              {lead.doNotCall && <Badge tone="red">Do not call</Badge>}
             </div>
             <p className="mt-0.5 text-[13.5px] text-slate-600">{lead.contactPerson}</p>
             <p className="text-[13.5px] text-slate-500">{lead.category}</p>
@@ -494,10 +502,12 @@ function Metric({
 function OverviewTab({
   lead,
   onEdit,
+  onDoNotCallChange,
   onOpenTranscripts,
 }: {
   lead: LeadDetail;
   onEdit?: () => void;
+  onDoNotCallChange?: (doNotCall: boolean) => Promise<void>;
   onOpenTranscripts: () => void;
 }) {
   return (
@@ -518,7 +528,7 @@ function OverviewTab({
         </div>
 
         <dl className="divide-y divide-slate-100 border-t border-slate-100">
-          <InfoRow label="Clinic Name" value={lead.name} />
+          <InfoRow label="Company Name" value={lead.name} />
           <InfoRow label="Contact Person" value={lead.contactPerson} />
           <InfoRow label="Phone Number" value={lead.phone} tabular />
           <InfoRow label="Email" value={lead.email ?? "—"} />
@@ -532,6 +542,9 @@ function OverviewTab({
           </InfoRow>
           <InfoRow label="Status">
             <LeadStatusBadge status={lead.status} />
+          </InfoRow>
+          <InfoRow label="Do not call">
+            <DoNotCallSwitch value={Boolean(lead.doNotCall)} onChange={onDoNotCallChange} />
           </InfoRow>
           <InfoRow label="Tags">
             <span className="flex flex-wrap justify-end gap-1.5">
@@ -592,6 +605,58 @@ function InfoRow({
         {children ?? value}
       </dd>
     </div>
+  );
+}
+
+/**
+ * The lead's do-not-call flag. A switch when the page can save it, plain text otherwise.
+ * It shows the new position while the save is in flight and goes back if the save fails,
+ * so it never claims an opt-out that was not recorded.
+ *
+ * `onChange` must resolve only once `value` carries the saved position (the screen
+ * reloads the lead before resolving). The switch holds `pending` until then; letting go
+ * earlier shows the old `value` again for a moment, and makes it clickable, right after a
+ * successful save.
+ */
+function DoNotCallSwitch({
+  value,
+  onChange,
+}: {
+  value: boolean;
+  onChange?: (doNotCall: boolean) => Promise<void>;
+}) {
+  const [pending, setPending] = useState<boolean | null>(null);
+
+  if (!onChange) return <>{value ? "Yes" : "No"}</>;
+
+  const shown = pending ?? value;
+
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={shown}
+      aria-label="Do not call"
+      disabled={pending !== null}
+      onClick={() => {
+        const next = !shown;
+        setPending(next);
+        onChange(next)
+          .catch(() => undefined)
+          .finally(() => setPending(null));
+      }}
+      className={cn(
+        "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-60",
+        shown ? "bg-alert-red" : "bg-slate-300",
+      )}
+    >
+      <span
+        className={cn(
+          "inline-block h-4 w-4 rounded-full bg-white shadow transition-transform",
+          shown ? "translate-x-[18px]" : "translate-x-0.5",
+        )}
+      />
+    </button>
   );
 }
 

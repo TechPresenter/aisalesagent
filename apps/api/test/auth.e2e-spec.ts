@@ -41,8 +41,9 @@ describe("Auth and workspace signup", () => {
 
       expect(response.body.tenant.subdomain).toBe("northwind");
       expect(response.body.owner.role).toBe("OWNER");
-      // Derived from the camel case, matching the sidebar monogram the web app renders.
-      expect(response.body.tenant.brandingConfig.monogram).toBe("DH");
+      // The first letter of each of the first two words, matching the sidebar monogram the
+      // web app renders.
+      expect(response.body.tenant.brandingConfig.monogram).toBe("NS");
 
       const users = await prisma.user.findMany({
         where: { tenantId: response.body.tenant.id },

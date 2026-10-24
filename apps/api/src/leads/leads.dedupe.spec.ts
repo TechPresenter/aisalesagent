@@ -1,7 +1,11 @@
 import {
   applyColumnMapping,
   dedupeImportRows,
+  isDoNotCallHeader,
   normalisePhone,
+  parseConsentDate,
+  parseDoNotCall,
+  suppressionCandidates,
   type ImportRow,
 } from "./leads.dedupe";
 
@@ -176,19 +180,124 @@ describe("dedupeImportRows", () => {
       row("A again", "09876543210"),
       row("B", "8765432123"),
       row("Existing", "7654321234"),
+      row("Opted out", "6987654321"),
       row("", "6543212345"),
       row("Bad", "xyz"),
+      row("Bad DND", "6123456789", { doNotCall: "perhaps" }),
     ];
 
-    const result = dedupeImportRows(rows, new Set(["917654321234"]));
+    const result = dedupeImportRows(rows, new Set(["917654321234"]), new Set(["916987654321"]));
 
     const accounted =
       result.toInsert.length +
       result.duplicatesInFile.length +
       result.duplicatesInDatabase.length +
+      result.suppressed.length +
       result.rejected.length;
 
     expect(accounted).toBe(rows.length);
+    expect(result.suppressed).toHaveLength(1);
+  });
+
+  it("skips and reports numbers on the do-not-call list", () => {
+    const result = dedupeImportRows(
+      [row("Opted Out", "+91 98765 43210"), row("Fine", "8765432123")],
+      new Set(),
+      new Set(["919876543210"]),
+    );
+
+    expect(result.toInsert.map((lead) => lead.name)).toEqual(["Fine"]);
+    expect(result.suppressed).toEqual([
+      {
+        sourceRow: 1,
+        reason: "number is on this workspace's do-not-call list",
+        value: "919876543210",
+      },
+    ]);
+  });
+
+  it("reports a suppressed number as suppressed even when it is also an existing lead", () => {
+    // "This person asked not to be called" is the fact a preview should lead with.
+    const result = dedupeImportRows(
+      [row("Both", "9876543210")],
+      new Set(["919876543210"]),
+      new Set(["919876543210"]),
+    );
+
+    expect(result.suppressed).toHaveLength(1);
+    expect(result.duplicatesInDatabase).toHaveLength(0);
+  });
+
+  it("carries a do-not-call column onto the lead and lists the number for suppression", () => {
+    const result = dedupeImportRows(
+      [
+        row("Opted Out", "9876543210", { doNotCall: "Yes" }),
+        row("Callable", "8765432123", { doNotCall: "no" }),
+        row("Blank", "7654321234", { doNotCall: "" }),
+      ],
+      new Set(),
+    );
+
+    expect(result.toInsert.map((lead) => [lead.name, lead.doNotCall])).toEqual([
+      ["Opted Out", true],
+      ["Callable", false],
+      ["Blank", false],
+    ]);
+    expect(result.doNotCallPhones).toEqual(["919876543210"]);
+    // Claimed by the lead itself, so it does not also land in custom_fields.
+    expect(result.toInsert[0].customFields).toBeNull();
+  });
+
+  it("honours an opt-out on a row that is skipped as a duplicate", () => {
+    // The lead is not imported, but the file is still saying this person must not be
+    // called — so the number is listed for suppression all the same.
+    const result = dedupeImportRows(
+      [row("First", "9876543210"), row("Second", "09876543210", { doNotCall: "DND" })],
+      new Set(["918765432123"]),
+    );
+    const existing = dedupeImportRows(
+      [row("Known", "8765432123", { doNotCall: "true" })],
+      new Set(["918765432123"]),
+    );
+
+    expect(result.duplicatesInFile).toHaveLength(1);
+    expect(result.doNotCallPhones).toEqual(["919876543210"]);
+    expect(existing.duplicatesInDatabase).toHaveLength(1);
+    expect(existing.doNotCallPhones).toEqual(["918765432123"]);
+  });
+
+  it("rejects a do-not-call value it cannot read rather than guessing", () => {
+    const result = dedupeImportRows(
+      [row("Unclear", "9876543210", { doNotCall: "maybe" })],
+      new Set(),
+    );
+
+    expect(result.toInsert).toHaveLength(0);
+    expect(result.rejected[0]).toMatchObject({ sourceRow: 1, value: "maybe" });
+    expect(result.rejected[0].reason).toMatch(/do-not-call/);
+  });
+
+  it("reads an ISO consent date and rejects every other spelling", () => {
+    const result = dedupeImportRows(
+      [
+        row("Dated", "9876543210", { consentCapturedAt: "2026-03-14" }),
+        row("Undated", "8765432123"),
+        row("Ambiguous", "7654321234", { consentCapturedAt: "05/10/2026" }),
+        row("Impossible", "6543212345", { consentCapturedAt: "2026-02-30" }),
+        row("Future", "6123456789", { consentCapturedAt: "2999-01-01" }),
+      ],
+      new Set(),
+    );
+
+    expect(result.toInsert.map((lead) => lead.consentCapturedAt?.toISOString() ?? null)).toEqual([
+      "2026-03-14T00:00:00.000Z",
+      null,
+    ]);
+    expect(result.rejected.map((r) => [r.sourceRow, r.reason])).toEqual([
+      [3, "consent date must be a real date written YYYY-MM-DD"],
+      [4, "consent date must be a real date written YYYY-MM-DD"],
+      [5, "consent date is in the future"],
+    ]);
   });
 
   it("normalises the number it stores, not the one it was given", () => {
@@ -258,6 +367,28 @@ describe("applyColumnMapping", () => {
     expect(rows[0].City).toBe("Patna");
   });
 
+  it("picks up a do-not-call column nobody mapped", () => {
+    // An opt-out a CRM export carried must not land in custom_fields and leave the person
+    // callable just because the uploader did not think to map it.
+    const rows = applyColumnMapping(
+      [{ Company: "Apex", Mobile: "9876543210", "Do Not Call": "Y" }],
+      { name: "Company", phone: "Mobile" },
+    );
+
+    expect(rows[0].doNotCall).toBe("Y");
+    expect(rows[0]["Do Not Call"]).toBeUndefined();
+  });
+
+  it("prefers an explicit do-not-call mapping to a guessed one", () => {
+    const rows = applyColumnMapping(
+      [{ Company: "Apex", Mobile: "9876543210", DND: "no", "Opted out": "yes" }],
+      { name: "Company", phone: "Mobile", doNotCall: "Opted out" },
+    );
+
+    expect(rows[0].doNotCall).toBe("yes");
+    expect(rows[0].DND).toBe("no");
+  });
+
   it("round-trips through dedupe with a realistically messy file", () => {
     const records = [
       { "Clinic Name": "Apex Dental Care", Mobile: "+91 98765 43210", Town: "Patna" },
@@ -275,5 +406,96 @@ describe("applyColumnMapping", () => {
     expect(result.toInsert).toHaveLength(2);
     expect(result.duplicatesInFile).toHaveLength(1);
     expect(result.toInsert[0].city).toBe("Patna");
+  });
+});
+
+describe("parseDoNotCall", () => {
+  it("reads the spellings spreadsheets use", () => {
+    for (const yes of ["yes", "Y", "TRUE", "1", "dnd", "DNC", "x", "Do Not Call", "do_not_call"]) {
+      expect(parseDoNotCall(yes)).toBe(true);
+    }
+    for (const no of ["no", "N", "false", "0", "", "  ", undefined, null]) {
+      expect(parseDoNotCall(no)).toBe(false);
+    }
+  });
+
+  it("returns null for anything else, so the row is sent back rather than guessed at", () => {
+    expect(parseDoNotCall("maybe")).toBeNull();
+    expect(parseDoNotCall("call later")).toBeNull();
+  });
+});
+
+describe("parseConsentDate", () => {
+  it("accepts ISO dates and date-times", () => {
+    expect(parseConsentDate("2026-03-14")?.toISOString()).toBe("2026-03-14T00:00:00.000Z");
+    expect(parseConsentDate("2026-03-14T10:30:00+05:30")?.toISOString()).toBe(
+      "2026-03-14T05:00:00.000Z",
+    );
+  });
+
+  it("treats a blank cell as no date at all", () => {
+    expect(parseConsentDate("")).toBeNull();
+    expect(parseConsentDate(undefined)).toBeNull();
+  });
+
+  it("refuses the day-month order JavaScript would silently misread", () => {
+    expect(parseConsentDate("05/10/2026")).toBeUndefined();
+    expect(parseConsentDate("14-03-2026")).toBeUndefined();
+  });
+
+  it("refuses a date that is not on the calendar instead of rolling it over", () => {
+    expect(parseConsentDate("2026-02-30")).toBeUndefined();
+    expect(parseConsentDate("2026-13-01")).toBeUndefined();
+    expect(parseConsentDate("2028-02-29")?.toISOString()).toBe("2028-02-29T00:00:00.000Z");
+  });
+});
+
+describe("isDoNotCallHeader", () => {
+  it("recognises the usual headers for a do-not-call column", () => {
+    const headers = ["DND", "dnc", "Do Not Call", "do_not_call", "do-not-call", " DoNotCall "];
+    for (const header of headers) {
+      expect(isDoNotCallHeader(header)).toBe(true);
+    }
+  });
+
+  it("leaves other columns alone", () => {
+    for (const header of ["Notes", "Called", "Do call", "Status"]) {
+      expect(isDoNotCallHeader(header)).toBe(false);
+    }
+  });
+});
+
+describe("suppressionCandidates", () => {
+  /** What the gate's query would find among `stored`, done in memory. */
+  const blocks = (phone: string, stored: string[]) => {
+    const { equals, endingWith } = suppressionCandidates(phone);
+    return stored.filter(
+      (entry) => equals.includes(entry) || (endingWith !== null && entry.endsWith(endingWith)),
+    );
+  };
+
+  it("matches an Indian mobile by its one normalised spelling and nothing else", () => {
+    expect(suppressionCandidates("919876543210")).toEqual({
+      equals: ["919876543210"],
+      endingWith: null,
+    });
+    // A shorter entry that happens to end the number is some other number, or a typo.
+    expect(blocks("919876543210", ["9876543210", "76543210", "919876543210"])).toEqual([
+      "919876543210",
+    ]);
+  });
+
+  it("matches an international number with or without its country code, either way round", () => {
+    // Blocked as "+1 415 555 0100", lead typed as "415-555-0100".
+    expect(blocks("4155550100", ["14155550100"])).toEqual(["14155550100"]);
+    // Blocked as "415-555-0100", lead typed as "+1 415 555 0100".
+    expect(blocks("14155550100", ["4155550100"])).toEqual(["4155550100"]);
+    expect(blocks("14155550100", ["14155550199", "4155550199"])).toEqual([]);
+  });
+
+  it("never tries a suffix shorter than a phone number can be", () => {
+    const { equals } = suppressionCandidates("14155550100");
+    expect(equals).toEqual(["14155550100", "4155550100", "155550100", "55550100"]);
+    expect(blocks("14155550100", ["5550100", "0100"])).toEqual([]);
   });
 });

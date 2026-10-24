@@ -1,3 +1,5 @@
+import type { Metadata } from "next";
+import { notFound } from "next/navigation";
 import { CheckCircle2, PhoneCall } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +10,7 @@ import { HandwritingText } from "@/components/ui/handwriting-text";
 import { DataTable, type Column } from "@/components/ui/data-table";
 import { DonutChart, DonutLegend, type DonutSlice } from "@/components/ui/donut-chart";
 import { TrendChart } from "@/components/ui/trend-chart";
+import { tenantBranding } from "@/config/branding";
 import {
   CallOutcomeBadge,
   CallStatusBadge,
@@ -23,6 +26,7 @@ import {
   type Tone,
 } from "@/lib/status";
 import { callOutcomes, callsTrend, leadSources, recentLeads } from "@/lib/mock-data";
+import { internalPagesHidden } from "@/lib/internal-pages";
 import { formatDate } from "@/lib/utils";
 import type { CallOutcome, CallStatus, Lead, LeadStatus } from "@/lib/types";
 
@@ -30,7 +34,14 @@ import type { CallOutcome, CallStatus, Lead, LeadStatus } from "@/lib/types";
  * Build Plan Phase 2 asks for a page that renders every component with sample data, so
  * the design system can be QA'd against the brand guidelines before real data is wired
  * in. Anything added to /components/ui belongs on this page too.
+ *
+ * Internal: it 404s on production builds (lib/internal-pages.ts), so it is only reachable
+ * under `next dev`.
  */
+export const metadata: Metadata = {
+  title: "Style Guide · AI Sales Agent",
+  robots: { index: false, follow: false },
+};
 
 const PRIMARY = [
   ["Brand Navy", "#0F2337", "Sidebar, headers, primary text"],
@@ -69,7 +80,7 @@ const sum = (slices: DonutSlice[]) => slices.reduce((total, s) => total + s.valu
 
 /** Demonstrates the generic table plus the badge-in-a-cell pattern §5 mandates. */
 const LEAD_COLUMNS: Column<Lead>[] = [
-  { key: "name", header: "Name / Clinic", className: "font-semibold", cell: (row) => row.name },
+  { key: "name", header: "Lead / Company", className: "font-semibold", cell: (row) => row.name },
   {
     key: "phone",
     header: "Phone",
@@ -100,6 +111,12 @@ function Section({ title, note, children }: { title: string; note: string; child
 }
 
 export default function StyleGuidePage() {
+  const hidden = internalPagesHidden({
+    NODE_ENV: process.env.NODE_ENV,
+    VERCEL_ENV: process.env.VERCEL_ENV,
+  });
+  if (hidden) notFound();
+
   return (
     <div className="space-y-5">
       <div>
@@ -312,15 +329,14 @@ export default function StyleGuidePage() {
 
       <Section
         title="HandwritingText"
-        note="Traces each glyph as a stroke, then inks it in. Degrades to plain text if the font or parser fails to load."
+        note="Uncovers an outline of the word left to right, then inks it in. CSS only — nothing is fetched — and shown still when reduced motion is requested."
       >
         <div className="space-y-6">
           <p className="flex flex-wrap items-baseline gap-x-2 text-h2 text-brand-navy">
             Find. Call. Convert. Grow
             <HandwritingText
-              words={["Northwind.", "your pipeline.", "every account.", "revenue."]}
+              words={["your pipeline.", "every account.", "revenue."]}
               className="text-brand-green"
-              height="1.15em"
             />
           </p>
 
@@ -329,7 +345,7 @@ export default function StyleGuidePage() {
               <p className="mb-1.5 text-[11.5px] uppercase tracking-wide text-slate-400">
                 Static, inked
               </p>
-              <HandwritingText text="Converted" className="text-deep-green" height="2rem" />
+              <HandwritingText text="Converted" className="text-[2rem] font-bold text-deep-green" />
             </div>
             <div>
               <p className="mb-1.5 text-[11.5px] uppercase tracking-wide text-slate-400">
@@ -339,8 +355,7 @@ export default function StyleGuidePage() {
                 text="Interested"
                 fill={false}
                 strokeWidth={2.2}
-                className="text-accent-purple"
-                height="2rem"
+                className="text-[2rem] font-bold text-accent-purple"
               />
             </div>
             <div>
@@ -350,10 +365,33 @@ export default function StyleGuidePage() {
               <HandwritingText
                 text="Demo Booked"
                 duration={3.4}
-                className="text-accent-blue"
-                height="2rem"
+                className="text-[2rem] font-bold text-accent-blue"
               />
             </div>
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        title="White-label workspace mark"
+        note="TRD §12 — the sidebar's workspace row in a tenant's own colours, using the sample payload in config/branding.ts. Customers see their workspace on the product green until per-workspace branding is read from the API."
+      >
+        <div className="w-sidebar rounded-xl bg-brand-navy p-3">
+          <div className="flex items-center gap-2.5 rounded-lg bg-white/[0.05] px-2.5 py-2">
+            <span
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[11.5px] font-bold text-white"
+              style={{ backgroundColor: tenantBranding.primaryColor }}
+            >
+              {tenantBranding.monogram}
+            </span>
+            <span className="min-w-0">
+              <span className="block truncate text-[12.5px] font-semibold leading-tight text-white">
+                {tenantBranding.tenantName}
+              </span>
+              <span className="block truncate text-[9.5px] uppercase tracking-[0.09em] text-white/45">
+                {tenantBranding.tagline}
+              </span>
+            </span>
           </div>
         </div>
       </Section>
